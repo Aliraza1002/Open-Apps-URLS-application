@@ -10,8 +10,13 @@ import re
 import time
 import winreg
 
-# File to save application paths and URLs
-SAVE_FILE = "app_paths.json"
+# File to save application & URL paths
+user_appdata = os.path.join(os.path.expanduser("~"), "AppData", "Local", "AutoLaunch Manager")
+SAVE_FILE = os.path.join(user_appdata, "app_paths.json")
+
+# Create the directory if it doesn't exist
+os.makedirs(user_appdata, exist_ok=True)
+
 changes_made = False  # Track if any changes have been made
 
 # Regex to validate URLs
@@ -49,7 +54,7 @@ def open_application(app_path, args=None):
         else:
             os.startfile(app_path)  # Open file
 
-        log_message(f"Successfully opened {app_path} with start-in {start_in}")
+        log_message(f"Successfully opened {app_path}")
     except Exception as e:
         log_message(f"Failed to open {app_path}: {e}")
 
@@ -67,13 +72,38 @@ def validate_url(url):
     """Validate if the string is a proper URL."""
     return re.match(URL_REGEX, url) is not None
 
+# Function to get both the target and "start-in" path from a shortcut
+def get_shortcut_details(shortcut_path):
+    if shortcut_path.endswith(".lnk"):
+        shortcut = winshell.shortcut(shortcut_path)
+        target = shortcut.path
+        start_in = shortcut.working_directory
+        return target, start_in
+    return shortcut_path, os.path.dirname(shortcut_path)
+
+# Update add_application to detect and set the "start-in" path for shortcuts
 def add_application():
     global changes_made
     file_path = filedialog.askopenfilename()
     if file_path:
-        app_listbox.insert(tk.END, file_path)
-        apps.append({"type": "application", "path": file_path, "start_in": ""})
-        log_message(f"Added application: {file_path}")
+        if file_path.endswith(".lnk"):  # If it's a shortcut
+            target_path, start_in_path = get_shortcut_details(file_path)  # Get target and start-in path
+            app_listbox.insert(tk.END, target_path)
+            apps.append({"type": "application", "path": target_path, "start_in": start_in_path})
+            log_message(f"Added shortcut: {target_path} with Start-In: {start_in_path}")
+        elif file_path.endswith(".exe"):  # If it's an executable
+            target_path = file_path
+            start_in_path = os.path.dirname(file_path)  # Set Start-In to the directory of the executable
+            app_listbox.insert(tk.END, target_path)
+            apps.append({"type": "application", "path": target_path, "start_in": start_in_path})
+            log_message(f"Added executable: {target_path} with Start-In: {start_in_path}")
+        else:  # Other file types
+            target_path = file_path
+            start_in_path = ""  # No Start-In required
+            app_listbox.insert(tk.END, target_path)
+            apps.append({"type": "application", "path": target_path, "start_in": start_in_path})
+            log_message(f"Added file: {target_path}.")
+
         changes_made = True
 
 def add_folder():
@@ -100,8 +130,10 @@ def add_url():
             messagebox.showerror("Invalid URL", "The URL provided is invalid.")
 
 def save_paths():
+    global changes_made
     save_data(apps)
     log_message("Applications, folders, and URLs saved!")
+    changes_made = False
 
 def load_paths():
     saved_data = load_saved_data()
@@ -184,15 +216,34 @@ def delete_selected_url():
                 break
 
 def on_drop_file(event, listbox, item_type):
-    """Handle the drop event and add the file/folder to the listbox."""
+    global changes_made
     file_paths = listbox.tk.splitlist(event.data)  # Split if multiple items are dropped
     for path in file_paths:
         if item_type == "url" and not validate_url(path):
             log_message(f"Invalid URL: {path}")
             continue
-        listbox.insert(tk.END, path)
-        apps.append({"type": item_type, "path": path})
-        log_message(f"Added {item_type}: {path}")
+        
+        # Handle application and shortcut logic
+        if item_type == "application":
+            if path.endswith(".lnk"):  # If it's a shortcut
+                target_path, start_in_path = get_shortcut_details(path)
+                listbox.insert(tk.END, target_path)
+                apps.append({"type": item_type, "path": target_path, "start_in": start_in_path})
+                log_message(f"Added shortcut: {target_path} with Start-In: {start_in_path}")
+            elif path.endswith(".exe"):  # If it's an executable
+                target_path = path
+                start_in_path = os.path.dirname(path)  # Set Start-In to the directory of the executable
+                listbox.insert(tk.END, target_path)
+                apps.append({"type": item_type, "path": target_path, "start_in": start_in_path})
+                log_message(f"Added executable: {target_path} with Start-In: {start_in_path}")
+            else:  # Not a shortcut or executable, just add it without a Start-In
+                target_path = path
+                start_in_path = ""  # No Start-In required
+                listbox.insert(tk.END, target_path)
+                apps.append({"type": item_type, "path": target_path, "start_in": start_in_path})
+                log_message(f"Added file: {target_path}.")
+        
+        changes_made = True
 
 def clear_log():
     """Clear the error log area."""
@@ -205,16 +256,24 @@ def on_double_click(event):
     selected = app_listbox.curselection()
     if selected:
         app_path = app_listbox.get(selected)
-        current_start_in = start_in_paths.get(app_path, "")
+        
+        # Get the current start_in path based on the apps list
+        current_start_in = ""
+        for app in apps:
+            if app["path"] == app_path:
+                current_start_in = app.get("start_in", "")
+                break
+        
+        # Ask for the new Start In path
         start_in = simpledialog.askstring("Start In Path", f"Enter the 'Start In' directory for {app_path}:", initialvalue=current_start_in)
         
         if start_in is not None:  # Check if the dialog was canceled
-            start_in_paths[app_path] = start_in
             # Update the start_in field in the corresponding app entry
             for app in apps:
                 if app["path"] == app_path:
                     app["start_in"] = start_in
                     break
+            start_in_paths[app_path] = start_in  # Update the start_in_paths dictionary
             log_message(f"Set 'Start In' path for {app_path}: {start_in}")
         else:
             log_message(f"No 'Start In' path set for {app_path}. Using default.")
@@ -313,13 +372,13 @@ log_text.pack(fill=tk.BOTH, expand=True)
 button_frame = ttk.Frame(frame_log)
 button_frame.pack(pady=5, fill=tk.X)
 
-clear_log_button = ttk.Button(button_frame, text="Clear Log", command=clear_log)
+clear_log_button = ttk.Button(button_frame, text="Clear Logs", command=clear_log)
 clear_log_button.pack(fill=tk.X, expand=True)
 
-run_button = ttk.Button(button_frame, text="Run All", command=run_all)
+run_button = ttk.Button(button_frame, text="Run", command=run_all)
 run_button.pack(fill=tk.X, expand=True)
 
-save_button = ttk.Button(button_frame, text="Save Paths", command=save_paths)
+save_button = ttk.Button(button_frame, text="Save", command=save_paths)
 save_button.pack(fill=tk.X, expand=True)
 
 load_paths()
