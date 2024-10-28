@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
-from tkinter import ttk, font as tkfont
+from tkinter import ttk, font as tkfont, PhotoImage
 from tkinterdnd2 import TkinterDnD, DND_FILES  # Import drag-and-drop functionality
 import json
 import subprocess
@@ -146,23 +146,64 @@ def load_paths():
     apps.extend(saved_data)
 
 def get_default_browser_path():
+    """Retrieve the default web browser executable path, checking both Program Files and Program Files (x86)."""
     try:
         # Open the registry key for the default browser
-        registry_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice")
+        registry_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
+                                      r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice")
         default_browser = winreg.QueryValueEx(registry_key, "ProgId")[0]
         winreg.CloseKey(registry_key)
 
-        # Map the ProgId to the corresponding browser executable path
-        if "Chrome" in default_browser:
-            return r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-        elif "Edge" in default_browser:
-            return r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-        else:
-            return None
+        # Possible installation paths for browsers
+        program_files_paths = [
+            r"C:\Program Files",
+            r"C:\Program Files (x86)"
+        ]
+        
+        # Browser executable paths within Program Files and Program Files (x86)
+        browser_paths = {
+            "Chrome": r"Google\Chrome\Application\chrome.exe",
+            "Edge": r"Microsoft\Edge\Application\msedge.exe",
+            "Firefox": r"Mozilla Firefox\firefox.exe",
+            "Brave": r"BraveSoftware\Brave-Browser\Application\brave.exe",
+        }
+        
+        # User-specific path for Opera -> Generally Opera is installed directly in the Local Appdata folder so in case it's not installed in program files, this is a safety net.
+        opera_user_path = os.path.expandvars(r"%LOCALAPPDATA%\Programs\Opera\launcher.exe")
+
+        # Map ProgId to check all possible installation directories
+        for base_path in program_files_paths:
+            if "Chrome" in default_browser:
+                chrome_path = os.path.join(base_path, browser_paths["Chrome"])
+                if os.path.isfile(chrome_path):
+                    return chrome_path
+            elif "Edge" in default_browser:
+                edge_path = os.path.join(base_path, browser_paths["Edge"])
+                if os.path.isfile(edge_path):
+                    return edge_path
+            elif "Firefox" in default_browser:
+                firefox_path = os.path.join(base_path, browser_paths["Firefox"])
+                if os.path.isfile(firefox_path):
+                    return firefox_path
+            elif "Brave" in default_browser:
+                brave_path = os.path.join(base_path, browser_paths["Brave"])
+                if os.path.isfile(brave_path):
+                    return brave_path
+            elif "Opera" in default_browser:
+                # Check both user-specific and program files paths for Opera
+                if os.path.isfile(opera_user_path):
+                    return opera_user_path
+                for base in program_files_paths:
+                    opera_path = os.path.join(base, "Opera", "launcher.exe")
+                    if os.path.isfile(opera_path):
+                        return opera_path
+
+        # If no browser found
+        return None
     except Exception as e:
         print(f"Error retrieving default browser path: {e}")
         return None
-    
+
 def run_all():
     browser_path = get_default_browser_path()
     first_url = True
@@ -172,7 +213,7 @@ def run_all():
         elif item["type"] == "url":
             try:
                 if first_url:
-                    subprocess.Popen([browser_path, "--new-window", item["path"]])
+                    subprocess.PopThaben([browser_path, "--new-window", item["path"]])
                     first_url = False
                     time.sleep(0.1)
                 else:
@@ -183,37 +224,40 @@ def run_all():
 
 def delete_selected_application():
     global changes_made
-    selected_index = app_listbox.curselection()
-    if selected_index:
-        deleted_item = app_listbox.get(selected_index)
-        app_listbox.delete(selected_index)
+    selected_indices = app_listbox.curselection()
+    if selected_indices:
+        # Collect paths of selected items to delete from the listbox and `apps` list
+        deleted_items = [app_listbox.get(i) for i in selected_indices]
         
-        # Delete the corresponding item in the apps list based on the index
-        for i, app in enumerate(apps):
-            if app["path"] == deleted_item:
-                del apps[i]
-                # Check if the deleted item exists in start_in_paths before deleting
-                if deleted_item in start_in_paths:
-                    del start_in_paths[deleted_item]
-                    log_message(f"Deleted from application & folder: {deleted_item}")
+        # Delete each selected item from the listbox and `apps` list
+        for item in deleted_items:
+            app_listbox.delete(app_listbox.get(0, tk.END).index(item))
+            # Remove item from `apps` list and update start_in_paths if necessary
+            for i, app in enumerate(apps):
+                if app["path"] == item:
+                    del apps[i]
+                    if item in start_in_paths:
+                        del start_in_paths[item]
+                    log_message(f"Deleted application/folder: {item}")
                     changes_made = True
-                else:
-                    log_message(f"Deleted from application & folder: {deleted_item}")
-                    changes_made = True
-                break
+                    break
 
 def delete_selected_url():
     global changes_made
-    selected_index = url_listbox.curselection()
-    if selected_index:
-        deleted_item = url_listbox.get(selected_index)
-        url_listbox.delete(selected_index)
-        for i, app in enumerate(apps):
-            if app["path"] == deleted_item:
-                del apps[i]
-                log_message(f"Deleted from URLs: {deleted_item}")
-                changes_made = True  # Set changes made to True
-                break
+    selected_indices = url_listbox.curselection()
+    if selected_indices:
+        # Collect URLs of selected items to delete from the listbox and `apps` list
+        deleted_items = [url_listbox.get(i) for i in selected_indices]
+        
+        # Delete each selected URL from the listbox and `apps` list
+        for item in deleted_items:
+            url_listbox.delete(url_listbox.get(0, tk.END).index(item))
+            for i, app in enumerate(apps):
+                if app["path"] == item:
+                    del apps[i]
+                    log_message(f"Deleted URL: {item}")
+                    changes_made = True
+                    break
 
 def on_drop_file(event, listbox, item_type):
     global changes_made
@@ -292,6 +336,9 @@ start_in_paths = {}
 # Create main application window
 root = TkinterDnD.Tk()
 root.title("AutoLaunch Manager V3")
+img = PhotoImage(file=r'C:\Users\Ali\Desktop\Html projects\V3\logo.png')
+root.iconbitmap(r'C:\Users\Ali\Desktop\Html projects\V3\logo.ico')
+root.iconphoto(False, img)
 root.update_idletasks()
 root.minsize(1000, 800)  # minimum size
 root.protocol("WM_DELETE_WINDOW", on_closing)
@@ -329,7 +376,7 @@ root.grid_rowconfigure(1, weight=1)
 app_label = ttk.Label(frame_apps, text="Applications & Folders")
 app_label.pack()
 
-app_listbox = tk.Listbox(frame_apps, selectmode=tk.SINGLE, bg="#AE8B70", fg="#303437", font=listbox_font)  # Set colors and font
+app_listbox = tk.Listbox(frame_apps, selectmode=tk.MULTIPLE, bg="#AE8B70", fg="#303437", font=listbox_font)  # Set colors and font
 app_listbox.pack(fill=tk.BOTH, expand=True)
 app_listbox.bind('<Double-Button-1>', on_double_click)
 
@@ -346,7 +393,7 @@ delete_app_button.pack(fill=tk.X)
 url_label = ttk.Label(frame_urls, text="URLs")
 url_label.pack()
 
-url_listbox = tk.Listbox(frame_urls, selectmode=tk.SINGLE, bg="#AE8B70", fg="#303437", font=listbox_font)  # Set colors and font
+url_listbox = tk.Listbox(frame_urls, selectmode=tk.MULTIPLE, bg="#AE8B70", fg="#303437", font=listbox_font)  # Set colors and font
 url_listbox.pack(fill=tk.BOTH, expand=True)
 url_listbox.bind('<Double-Button-1>', on_double_click)
 
