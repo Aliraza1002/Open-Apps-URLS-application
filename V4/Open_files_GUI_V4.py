@@ -8,14 +8,39 @@ import winshell
 import re
 import time
 import winreg
+import pyautogui
+from cryptography.fernet import Fernet
+
+
+# Generate and save encryption key if it doesn't exist
+def generate_key():
+    if not os.path.exists(KEY_FILE):
+        key = Fernet.generate_key()
+        with open(KEY_FILE, 'wb') as key_file:
+            key_file.write(key)
+# Load the encryption key
+def load_key():
+    with open(KEY_FILE, 'rb') as key_file:
+        return key_file.read()
+
+# Encrypt the password
+def encrypt_password(password):
+    fernet = Fernet(load_key())
+    return fernet.encrypt(password.encode()).decode()
+
+# Decrypt the password
+def decrypt_password(encrypted_password):
+    fernet = Fernet(load_key())
+    return fernet.decrypt(encrypted_password.encode()).decode()
 
 # File to save application & URL paths
 user_appdata = os.path.join(os.path.expanduser("~"), "AppData", "Local", "AutoLaunch Interface")
 SAVE_FILE = os.path.join(user_appdata, "application_configurations.json")
+KEY_FILE = os.path.join(user_appdata, "secret.key")
 
 # Create the directory if it doesn't exist
 os.makedirs(user_appdata, exist_ok=True)
-
+generate_key()
 changes_made = False  # Track if any changes have been made
 
 # Regex to validate URLs
@@ -36,22 +61,47 @@ def log_message(message):
 
 def open_application(app_path, args=None):
     try:
-        # Get the start in path from the app data
+        # Get the start-in path from the app data
         original_start_in = start_in_paths.get(app_path, os.path.dirname(app_path))
-        start_in = original_start_in 
+        start_in = original_start_in
+
+        # Check if app has password and tab_count in JSON
+        app_entry = next((item for item in apps if item["path"] == app_path), None)
+        if app_entry and "password" in app_entry and "tab_count" in app_entry:
+            encrypted_password = app_entry["password"]  # This is the encrypted password
+            tab_count = app_entry["tab_count"]
+            # Decrypt the password here using the encrypted password
+            password = decrypt_password(encrypted_password)  # Decrypt the password correctly
+        else:
+            password = None
+            tab_count = 0
 
         if app_path.endswith(".lnk"):  # Resolve shortcut files
             app_path = winshell.shortcut(app_path).path
 
         if os.path.isdir(app_path):  # Open folder
             os.startfile(app_path)
+            time.sleep(3)
         elif app_path.endswith(".exe"):  # Run executable
             if args:
                 subprocess.Popen([app_path] + args, cwd=start_in)
             else:
                 subprocess.Popen(app_path, cwd=start_in)
+
+            # If password and tab_count are provided, simulate key presses
+            if password is not None:
+                time.sleep(2)  # Wait for the app to launch
+                pyautogui.write(password)  # Type the decrypted password
+
+                # Simulate tab presses
+                for _ in range(tab_count):
+                    pyautogui.press('tab')
+
+                pyautogui.press('enter')
+                time.sleep(5)
         else:
             os.startfile(app_path)  # Open file
+            time.sleep(5)
 
         log_message(f"Successfully opened {app_path}")
     except Exception as e:
@@ -64,12 +114,18 @@ def load_saved_data():
                 data = json.load(file)
                 
                 for item in data:
+                    # Only decrypt if the password is marked as encrypted
+                    if "password" in item and item.get("is_encrypted", False):
+                        item["password"] = decrypt_password(item["password"])  # Decrypt password
+                        item["is_encrypted"] = False  # Set flag to indicate it's now decrypted
+
                     display_name = item["name"] if item.get("name") else item["path"]
                     if item["type"] in ["application", "folder"]:
                         app_listbox.insert(tk.END, display_name)
                         start_in_paths[item["path"]] = item.get("start_in", "")
                     elif item["type"] == "url":
                         url_listbox.insert(tk.END, display_name)
+                
                 apps.extend(data)
                 return data
         except json.JSONDecodeError:
@@ -82,11 +138,27 @@ def load_saved_data():
         return []  # Return an empty list if the file does not exist
 
 def save_data(data):
+    encrypted_data = []  # Temporarily hold encrypted items for saving
+
     for item in data:
-        if "name" not in item:
-            item["name"] = os.path.basename(item["path"])
+        item_copy = item.copy()  # Create a copy of the item to encrypt and save
+        
+        # Encrypt the password only if it's not already encrypted
+        if "password" in item and not item.get("is_encrypted", False):
+            item_copy["password"] = encrypt_password(item["password"])
+            item_copy["is_encrypted"] = True  # Set the encryption flag to True
+        
+        encrypted_data.append(item_copy)  # Append the encrypted copy
+
+    # Save the encrypted data to the file
     with open(SAVE_FILE, 'w') as file:
-        json.dump(data, file)
+        json.dump(encrypted_data, file)
+
+    # Restore decrypted passwords in `data` after saving
+    for item in data:
+        if "password" in item and item.get("is_encrypted", False):
+            item["password"] = decrypt_password(item["password"])  # Keep passwords decrypted in memory
+            item["is_encrypted"] = False  # Reset the encryption flag
 
 def validate_url(url):
     """Validate if the string is a proper URL."""
@@ -341,11 +413,11 @@ def clear_log():
     log_text.config(state=tk.DISABLED)
     log_message("Messages log cleared.")
 
-def on_double_click(event):
-    selected = app_listbox.curselection()
+def set_start_in_path(listbox):
+    selected = listbox.curselection()
     if selected:
-        # Get the current selected name (displayed in the listbox)
-        display_name = app_listbox.get(selected)
+        # Get the currently selected item’s display name
+        display_name = listbox.get(selected)
 
         # Find the corresponding app entry based on display name
         current_start_in = ""
@@ -368,18 +440,23 @@ def on_double_click(event):
 
                 # Log the changes
                 log_message(f"Set 'Start In' path for {display_name}: {start_in}")
-
+                global changes_made
+                changes_made = True
                 # Refresh the listbox to reflect changes
-                app_listbox.delete(selected)  # Remove the old entry
-                app_listbox.insert(selected, display_name)  # Insert updated name
+                listbox.delete(selected)  # Remove the old entry
+                listbox.insert(selected, display_name)  # Insert updated name
 
 # exit application confirmation
 def on_closing():
     if changes_made:
-        answer = messagebox.askyesno("Unsaved Changes", "You have unsaved changes. Do you want to save before exiting?")
-        if answer:  # User chose to save
+        answer = messagebox.askyesnocancel("Unsaved Changes", "You have unsaved changes. Do you want to save before exiting?")
+        if answer:
             save_paths()
-    root.destroy()  # Close the application
+            root.destroy()
+        elif answer is False:
+            root.destroy()
+    else:
+        root.destroy()
 
 # Function to handle renaming an item
 def rename_item(event, listbox, item_type):
@@ -430,17 +507,84 @@ def rename_item(event, listbox, item_type):
             item["name"] = custom_name
             listbox.delete(selected_index)
             listbox.insert(selected_index, custom_name)
+            global changes_made
+            changes_made = True
         rename_dialog.destroy()
 
     # Save button to trigger save_name function
     save_button = ttk.Button(rename_dialog, text="Save", command=save_name)
     save_button.pack(pady=10)
 
+# Function to handle saving a password
+def save_password(listbox):
+    selected_index = listbox.curselection()
+    if not selected_index:
+        return
+    selected_index = selected_index[0]
+    selected_item = listbox.get(selected_index)
+
+    # Find the selected app/item
+    item = next((i for i in apps if i.get("name", i["path"]) == selected_item), None)
+    if item:
+        # Decrypt the original password for display if it exists
+        original_password = decrypt_password(item["password"]) if "password" in item else ""
+        original_tab_count = item.get("tab_count", 0)
+
+    # Password and tab count save dialog
+    save_dialog = tk.Toplevel(root)
+    save_dialog.title("Save Password and Tab Count")
+    save_dialog.update_idletasks()
+    save_dialog.minsize(450, 220)
+
+    # Label and Entry for password
+    tk.Label(save_dialog, text="Enter Application Password:").pack(pady=5)
+    password_entry = ttk.Entry(save_dialog, show="*")
+    password_entry.insert(0, original_password)
+    password_entry.pack(pady=5, fill=tk.X)
+
+    # Label and Entry for tab count with numeric validation
+    tk.Label(save_dialog, text="Tab Count (optional):").pack(pady=5)
+    tab_count_entry = ttk.Entry(save_dialog)
+    tab_count_entry.insert(0, original_tab_count)
+    tab_count_entry.pack(pady=5, fill=tk.X)
+
+    # Validation to accept only numbers
+    def validate_numeric_input(value):
+        return value.isdigit() or value == ""
+    
+    tab_count_entry.config(
+        validate="key", validatecommand=(root.register(validate_numeric_input), '%P')
+    )
+
+    # Define save_password_action to save the password and tab count
+    def save_password_action():
+        new_password = password_entry.get().strip()
+        tab_count = tab_count_entry.get().strip()
+        
+        if new_password:
+            item["password"] = encrypt_password(new_password)  # Encrypt before saving
+        if tab_count.isdigit():  # Ensure tab count is a valid number
+            item["tab_count"] = int(tab_count)
+        
+        global changes_made
+        changes_made = True
+        save_dialog.destroy()
+
+    # Save button to trigger save_password_action
+    save_button = ttk.Button(save_dialog, text="Save", command=save_password_action)
+    save_button.pack(pady=10)
+
+# Example of adding the save_password function to the context menu
 def show_context_menu(event, listbox):
     context_menu = tk.Menu(root, tearoff=0)
     context_menu.add_command(label="Change Name", command=lambda: rename_item(event, listbox, "application"))
-    context_menu.post(event.x_root, event.y_root)
+    
+    if listbox == app_listbox:
+        context_menu.add_command(label="Set Login Info", command=lambda: save_password(listbox))
+        context_menu.add_command(label="Set Start In Path", command=lambda: set_start_in_path(listbox))
 
+    context_menu.post(event.x_root, event.y_root)
+    
 apps = []
 start_in_paths = {}
 
@@ -489,7 +633,6 @@ app_label.pack()
 
 app_listbox = tk.Listbox(frame_apps, selectmode=tk.MULTIPLE, bg="#AE8B70", fg="#303437", font=listbox_font)  # Set colors and font
 app_listbox.pack(fill=tk.BOTH, expand=True)
-app_listbox.bind('<Double-Button-1>', on_double_click)
 
 add_app_button = ttk.Button(frame_apps, text="Add Application", command=add_application)
 add_app_button.pack(fill=tk.X)
@@ -509,7 +652,6 @@ url_label.pack()
 
 url_listbox = tk.Listbox(frame_urls, selectmode=tk.MULTIPLE, bg="#AE8B70", fg="#303437", font=listbox_font)  # Set colors and font
 url_listbox.pack(fill=tk.BOTH, expand=True)
-url_listbox.bind('<Double-Button-1>', on_double_click)
 
 url_entry = ttk.Entry(frame_urls)
 url_entry.pack(fill=tk.X)
