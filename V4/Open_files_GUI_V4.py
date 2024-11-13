@@ -1,16 +1,8 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk, font as tkfont, PhotoImage, Toplevel, Label
 from tkinterdnd2 import TkinterDnD, DND_FILES, DND_TEXT
-import json
-import subprocess
-import os
-import winshell
-import re
-import time
-import winreg
-import pyautogui
+import json, subprocess, os, sys, winshell, re, time, winreg, pyautogui
 from cryptography.fernet import Fernet
-
 
 # Generate and save encryption key if it doesn't exist
 def generate_key():
@@ -18,6 +10,7 @@ def generate_key():
         key = Fernet.generate_key()
         with open(KEY_FILE, 'wb') as key_file:
             key_file.write(key)
+
 # Load the encryption key
 def load_key():
     with open(KEY_FILE, 'rb') as key_file:
@@ -34,7 +27,7 @@ def decrypt_password(encrypted_password):
     return fernet.decrypt(encrypted_password.encode()).decode()
 
 # File to save application & URL paths
-user_appdata = os.path.join(os.path.expanduser("~"), "AppData", "Local", "AutoLaunch Interface")
+user_appdata = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Auto Launch Interface V2")
 SAVE_FILE = os.path.join(user_appdata, "application_configurations.json")
 KEY_FILE = os.path.join(user_appdata, "secret.key")
 
@@ -249,9 +242,10 @@ def load_paths():
             start_in_paths[item["path"]] = item.get("start_in", "")
         elif item["type"] == "url":
             url_listbox.insert(tk.END, display_name)
-    
-    # Update apps with the latest saved data
-    apps.extend(saved_data)
+        
+        # If actions exist, save them in the `apps` list
+        item["actions"] = item.get("actions", [])  # Set default to empty list if no actions field
+        apps.append(item)  # Add the item (with actions) to the apps list
 
 def get_default_browser_path():
     """Retrieve the default web browser executable path, checking both Program Files and Program Files (x86)."""
@@ -515,72 +509,177 @@ def rename_item(event, listbox, item_type):
     save_button = ttk.Button(rename_dialog, text="Save", command=save_name)
     save_button.pack(pady=10)
 
-# Function to handle saving a password
-def save_password(listbox):
+# Load and decrypt passwords in the actions, only if necessary
+def load_decrypted_actions(actions):
+    for action in actions:
+        if action.get("type") == "Password" and action.get("value"):
+            # Decrypt only if not already decrypted
+            if not isinstance(action["value"], str) or len(action["value"]) > 1:
+                action["value"] = decrypt_password(action["value"])
+    return actions
+
+# Display password as masked text in the listbox, only in session
+def display_action_text(action):
+    action_type = action.get("type")
+    action_value = action.get("value", "")
+
+    if action_type == "Password":
+        # Mask password length based on decrypted length for display
+        masked_password = "*" * len(action_value)
+        return f"Password: {masked_password}"
+    elif action_type == "Sleep":
+        return f"Sleep: {action_value} sec"
+    else:
+        return f"{action_type}: {action_value}"
+
+
+def open_action_sequence_dialog(listbox):
+    sequence_dialog = tk.Toplevel(root)
+    sequence_dialog.title("Edit Action Sequence")
+    sequence_dialog.geometry("400x500")
+    sequence_dialog.minsize(400, 500)
+
+    temp_actions = []
+    decrypted_in_session = False  # Track if data is decrypted for display in this session
+
     selected_index = listbox.curselection()
     if not selected_index:
         return
+
     selected_index = selected_index[0]
     selected_item = listbox.get(selected_index)
+    app = next((item for item in apps if item.get("name", item["path"]) == selected_item), None)
 
-    # Find the selected app/item
-    item = next((i for i in apps if i.get("name", i["path"]) == selected_item), None)
-    if item:
-        # Decrypt the original password for display if it exists
-        original_password = decrypt_password(item["password"]) if "password" in item else ""
-        original_tab_count = item.get("tab_count", 0)
+    if app:
+        temp_actions.extend(load_decrypted_actions(app.get("actions", [])))
+        decrypted_in_session = True
 
-    # Password and tab count save dialog
-    save_dialog = tk.Toplevel(root)
-    save_dialog.title("Save Password and Tab Count")
-    save_dialog.update_idletasks()
-    save_dialog.minsize(450, 220)
+    action_list_label = tk.Label(sequence_dialog, text="Action Sequence:")
+    action_list_label.pack(pady=10)
 
-    # Label and Entry for password
-    tk.Label(save_dialog, text="Enter Application Password:").pack(pady=5)
-    password_entry = ttk.Entry(save_dialog, show="*")
-    password_entry.insert(0, original_password)
-    password_entry.pack(pady=5, fill=tk.X)
+    actions_listbox = tk.Listbox(sequence_dialog, height=10, width=50)
+    actions_listbox.pack(pady=5)
 
-    # Label and Entry for tab count with numeric validation
-    tk.Label(save_dialog, text="Tab Count (optional):").pack(pady=5)
-    tab_count_entry = ttk.Entry(save_dialog)
-    tab_count_entry.insert(0, original_tab_count)
-    tab_count_entry.pack(pady=5, fill=tk.X)
+    for action in temp_actions:
+        actions_listbox.insert(tk.END, display_action_text(action))
 
-    # Validation to accept only numbers
-    def validate_numeric_input(value):
-        return value.isdigit() or value == ""
-    
-    tab_count_entry.config(
-        validate="key", validatecommand=(root.register(validate_numeric_input), '%P')
-    )
+    selected_action = tk.StringVar()
+    action_options = ["Tab", "Enter", "Input Field", "Password", "Sleep"]
+    action_dropdown = tk.OptionMenu(sequence_dialog, selected_action, *action_options)
+    action_dropdown.pack(pady=10)
 
-    # Define save_password_action to save the password and tab count
-    def save_password_action():
-        new_password = password_entry.get().strip()
-        tab_count = tab_count_entry.get().strip()
-        
-        if new_password:
-            item["password"] = encrypt_password(new_password)  # Encrypt before saving
-        if tab_count.isdigit():  # Ensure tab count is a valid number
-            item["tab_count"] = int(tab_count)
-        
+    add_action_button = tk.Button(sequence_dialog, text="Add Action",
+                                  command=lambda: add_selected_action(actions_listbox, temp_actions, selected_action))
+    add_action_button.pack(pady=10)
+
+    delete_action_button = tk.Button(sequence_dialog, text="Delete Action",
+                                     command=lambda: delete_selected_action(actions_listbox, temp_actions))
+    delete_action_button.pack(pady=5)
+
+    move_up_button = tk.Button(sequence_dialog, text="Move Up",
+                               command=lambda: move_action(actions_listbox, temp_actions, -1))
+    move_up_button.pack(pady=5)
+
+    move_down_button = tk.Button(sequence_dialog, text="Move Down",
+                                 command=lambda: move_action(actions_listbox, temp_actions, 1))
+    move_down_button.pack(pady=5)
+
+    save_sequence_button = tk.Button(sequence_dialog, text="Save Sequence",
+                                     command=lambda: save_action_sequence(temp_actions, listbox, selected_item,
+                                                                          sequence_dialog, selected_index))
+    save_sequence_button.pack(pady=10)
+
+    sequence_dialog.protocol("WM_DELETE_WINDOW", lambda: on_close(sequence_dialog, temp_actions, app, decrypted_in_session))
+
+def add_selected_action(actions_listbox, temp_actions, selected_action):
+    action_type = selected_action.get()
+    if action_type in ["Input Field", "Password", "Sleep"]:
+        open_input_dialog(action_type, actions_listbox, temp_actions)
+    else:
+        action = {"type": action_type}
+        if action_type == "Password":
+            password = input_field.get().strip()  # Get the password
+            encrypted_password = encrypt_password(password)  # Encrypt the password before saving
+            action["value"] = encrypted_password
+            action["decrypted_in_session"] = True  # Mark this action as decrypted for session
+
+        temp_actions.append(action)
+        actions_listbox.insert(tk.END, display_action_text(action))
+
+def open_input_dialog(action_type, actions_listbox, temp_actions):
+    input_dialog = tk.Toplevel(root)
+    input_dialog.title(f"Enter {action_type} Value")
+
+    tk.Label(input_dialog, text=f"Enter value for {action_type}:").pack(pady=5)
+    input_field = tk.Entry(input_dialog)
+    input_field.pack(pady=5)
+
+    if action_type == "Password":
+        input_field.config(show="*")
+
+    def submit_action():
+        value = input_field.get().strip()
+        if value:
+            action = {"type": action_type, "value": value}
+            temp_actions.append(action)
+            actions_listbox.insert(tk.END, display_action_text(action))
+            input_dialog.destroy()
+
+    tk.Button(input_dialog, text="Submit", command=submit_action).pack(pady=10)
+
+def delete_selected_action(actions_listbox, temp_actions):
+    selected_index = actions_listbox.curselection()
+    if selected_index:
+        index = selected_index[0]
+        del temp_actions[index]
+        actions_listbox.delete(index)
+
+def move_action(actions_listbox, temp_actions, direction):
+    selected_index = actions_listbox.curselection()
+    if selected_index:
+        index = selected_index[0]
+        new_index = index + direction
+        if 0 <= new_index < len(temp_actions):
+            temp_actions[index], temp_actions[new_index] = temp_actions[new_index], temp_actions[index]
+            actions_listbox.delete(index)
+            actions_listbox.insert(new_index, display_action_text(temp_actions[new_index]))
+            actions_listbox.select_set(new_index)
+
+def save_action_sequence(temp_actions, listbox, selected_item, sequence_dialog, selected_index):
+    app = next((item for item in apps if item.get("name", item["path"]) == selected_item), None)
+    if app:
+        for action in temp_actions:
+            if action["type"] == "Password":
+                action["value"] = encrypt_password(action["value"])
+
+        app["actions"] = temp_actions[:]
+        log_message(f"Action sequence saved for {selected_item}")
+
+        listbox.delete(selected_index)
+        listbox.insert(selected_index, selected_item)
         global changes_made
         changes_made = True
-        save_dialog.destroy()
 
-    # Save button to trigger save_password_action
-    save_button = ttk.Button(save_dialog, text="Save", command=save_password_action)
-    save_button.pack(pady=10)
+    sequence_dialog.destroy()
 
+def on_close(sequence_dialog, temp_actions, app, decrypted_in_session):
+    if decrypted_in_session and app:
+        # Re-encrypt only those marked as decrypted in-session
+        for action in temp_actions:
+            if action.get("type") == "Password" and action.get("decrypted_in_session", False):
+                action["value"] = encrypt_password(action["value"])
+                action["decrypted_in_session"] = False  # Reset the flag after re-encryption
+
+    # Close the dialog without saving any changes
+    sequence_dialog.destroy()
+    
 # Example of adding the save_password function to the context menu
 def show_context_menu(event, listbox):
     context_menu = tk.Menu(root, tearoff=0)
     context_menu.add_command(label="Change Name", command=lambda: rename_item(event, listbox, "application"))
-    
+
     if listbox == app_listbox:
-        context_menu.add_command(label="Set Login Info", command=lambda: save_password(listbox))
+        context_menu.add_command(label="Edit Action Sequence", command=lambda: open_action_sequence_dialog(listbox))
         context_menu.add_command(label="Set Start In Path", command=lambda: set_start_in_path(listbox))
 
     context_menu.post(event.x_root, event.y_root)
@@ -590,9 +689,10 @@ start_in_paths = {}
 
 # Create main application window
 root = TkinterDnD.Tk()
-root.title("AutoLaunch Interface V4")
-img = PhotoImage(file=r'C:\Users\araza\OneDrive - Sir Wilfrid Laurier School Board\Desktop\Personal\logo.png')
-root.iconbitmap(r'C:\Users\araza\OneDrive - Sir Wilfrid Laurier School Board\Desktop\Personal\logo.ico')
+root.title("Auto Launch Interface")
+base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+img = PhotoImage(file=os.path.join(base_path, 'logo.png'))
+root.iconbitmap(os.path.join(base_path, 'logo.ico'))
 root.iconphoto(False, img)
 root.update_idletasks()
 root.minsize(1000, 800)
