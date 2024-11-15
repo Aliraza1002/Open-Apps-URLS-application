@@ -3,6 +3,10 @@ from tkinter import filedialog, messagebox, simpledialog, ttk, font as tkfont, P
 from tkinterdnd2 import TkinterDnD, DND_FILES, DND_TEXT
 import json, subprocess, os, sys, winshell, re, time, winreg, pyautogui
 from cryptography.fernet import Fernet
+from pynput import mouse
+from pynput.mouse import Listener
+import threading
+import keyboard
 
 # Generate and save encryption key if it doesn't exist
 def generate_key():
@@ -55,50 +59,91 @@ def log_message(message):
 def open_application(app_path, args=None):
     try:
         # Get the start-in path from the app data
-        original_start_in = start_in_paths.get(app_path, os.path.dirname(app_path))
-        start_in = original_start_in
+        start_in = start_in_paths.get(app_path, os.path.dirname(app_path))
 
-        # Check if app has password and tab_count in JSON
+        # Retrieve the app entry and associated actions
         app_entry = next((item for item in apps if item["path"] == app_path), None)
-        if app_entry and "password" in app_entry and "tab_count" in app_entry:
-            encrypted_password = app_entry["password"]  # This is the encrypted password
-            tab_count = app_entry["tab_count"]
-            # Decrypt the password here using the encrypted password
-            password = decrypt_password(encrypted_password)  # Decrypt the password correctly
-        else:
-            password = None
-            tab_count = 0
+        actions = app_entry.get("actions", []) if app_entry else []
 
         if app_path.endswith(".lnk"):  # Resolve shortcut files
             app_path = winshell.shortcut(app_path).path
 
+        # Launch the application
         if os.path.isdir(app_path):  # Open folder
             os.startfile(app_path)
             time.sleep(3)
+            
+            # Execute each action in the sequence
+            for action in actions:
+                execute_action(action)
+                
         elif app_path.endswith(".exe"):  # Run executable
             if args:
                 subprocess.Popen([app_path] + args, cwd=start_in)
             else:
                 subprocess.Popen(app_path, cwd=start_in)
+            time.sleep(2)  # Wait briefly for the app to load
 
-            # If password and tab_count are provided, simulate key presses
-            if password is not None:
-                time.sleep(2)  # Wait for the app to launch
-                pyautogui.write(password)  # Type the decrypted password
+            # Execute each action in the sequence
+            for action in actions:
+                execute_action(action)
 
-                # Simulate tab presses
-                for _ in range(tab_count):
-                    pyautogui.press('tab')
-
-                pyautogui.press('enter')
-                time.sleep(5)
         else:
-            os.startfile(app_path)  # Open file
-            time.sleep(5)
+            os.startfile(app_path)  # Open non-executable file or URL
+            time.sleep(3)
 
         log_message(f"Successfully opened {app_path}")
+
     except Exception as e:
         log_message(f"Failed to open {app_path}: {e}")
+
+def execute_action(action):
+    action_type = action.get("type")
+    position = action.get("position", (0, 0))
+    click_type = action.get("click_type", "left")
+
+    print(f"Executing action: {action_type} at {position}")
+
+    if action_type == "Mouse Move":
+        # Move the mouse to the position
+        pyautogui.moveTo(position[0], position[1], duration=0.2)  # Smooth movement
+        print(f"Moved mouse to {position}")
+    elif action_type == "Mouse Clicks":
+        # Move to position and click
+        pyautogui.moveTo(position[0], position[1], duration=0.2)
+        if click_type == "left":
+            pyautogui.click()
+        else:
+            pyautogui.rightClick()
+        print(f"{click_type.capitalize()} click at {position}")
+    elif action_type == "Password":
+        decrypted_password = decrypt_password(action.get("value", ""))
+        pyautogui.write(decrypted_password)
+        print("Typed password")
+    elif action_type == "Tab":
+        pyautogui.press("tab")
+    elif action_type == "Enter":
+        pyautogui.press("enter")
+    elif action_type == "Input Field":
+        pyautogui.write(action.get("value", ""))
+    elif action_type == "Sleep":
+        time.sleep(int(action.get("value", 1)))
+    elif action_type == "Escape":
+        pyautogui.press("esc")
+    elif action_type == "Space":
+        pyautogui.press("space")
+    elif action_type == "Left Arrow":
+        pyautogui.press("left")
+    elif action_type == "Right Arrow":
+        pyautogui.press("right")
+    elif action_type == "Up Arrow":
+        pyautogui.press("up")
+    elif action_type == "Down Arrow":
+        pyautogui.press("down")
+    elif action_type == "Full Screen":
+        pyautogui.hotkey("win", "up")
+
+    time.sleep(0.5)  # Small delay between actions
 
 def load_saved_data():
     if os.path.exists(SAVE_FILE):
@@ -109,7 +154,7 @@ def load_saved_data():
                 for item in data:
                     # Only decrypt if the password is marked as encrypted
                     if "password" in item and item.get("is_encrypted", False):
-                        item["password"] = decrypt_password(item["password"])  # Decrypt password
+                        item["password"] = decrypt_password(item["password"])
                         item["is_encrypted"] = False  # Set flag to indicate it's now decrypted
 
                     display_name = item["name"] if item.get("name") else item["path"]
@@ -514,24 +559,31 @@ def load_decrypted_actions(actions):
     for action in actions:
         if action.get("type") == "Password" and action.get("value"):
             # Decrypt only if not already decrypted
-            if not isinstance(action["value"], str) or len(action["value"]) > 1:
-                action["value"] = decrypt_password(action["value"])
+            if isinstance(action["value"], str) and action.get("decrypted_in_session") is False:
+                try:
+                    action["value"] = decrypt_password(action["value"])
+                    action["decrypted_in_session"] = True  # Mark this as decrypted for session
+                except Exception as e:
+                    print(f"Error decrypting password: {e}")
+                    action["value"] = ""  # Reset to empty if decryption fails
     return actions
 
 # Display password as masked text in the listbox, only in session
 def display_action_text(action):
     action_type = action.get("type")
     action_value = action.get("value", "")
+    position = action.get("position", (None, None))
+    click_type = action.get("click_type", "")
 
     if action_type == "Password":
-        # Mask password length based on decrypted length for display
-        masked_password = "*" * len(action_value)
+        masked_password = "*" * len(action_value) if isinstance(action_value, str) else action_value
         return f"Password: {masked_password}"
     elif action_type == "Sleep":
         return f"Sleep: {action_value} sec"
+    elif action_type == "Mouse Clicks":
+        return f"{click_type.capitalize()} Click at {position}"
     else:
         return f"{action_type}: {action_value}"
-
 
 def open_action_sequence_dialog(listbox):
     sequence_dialog = tk.Toplevel(root)
@@ -540,7 +592,7 @@ def open_action_sequence_dialog(listbox):
     sequence_dialog.minsize(400, 500)
 
     temp_actions = []
-    decrypted_in_session = False  # Track if data is decrypted for display in this session
+    decrypted_in_session = False
 
     selected_index = listbox.curselection()
     if not selected_index:
@@ -564,12 +616,14 @@ def open_action_sequence_dialog(listbox):
         actions_listbox.insert(tk.END, display_action_text(action))
 
     selected_action = tk.StringVar()
-    action_options = ["Tab", "Enter", "Input Field", "Password", "Sleep"]
+    action_options = ["Tab", "Enter", "Input Field", "Password", "Sleep", "Escape", "Space",
+                    "Left Arrow", "Right Arrow", "Up Arrow", "Down Arrow", "Mouse Clicks", "Full Screen"]
+
     action_dropdown = tk.OptionMenu(sequence_dialog, selected_action, *action_options)
     action_dropdown.pack(pady=10)
 
     add_action_button = tk.Button(sequence_dialog, text="Add Action",
-                                  command=lambda: add_selected_action(actions_listbox, temp_actions, selected_action))
+                               command=lambda: add_selected_action(actions_listbox, temp_actions, selected_action, sequence_dialog))
     add_action_button.pack(pady=10)
 
     delete_action_button = tk.Button(sequence_dialog, text="Delete Action",
@@ -585,27 +639,75 @@ def open_action_sequence_dialog(listbox):
     move_down_button.pack(pady=5)
 
     save_sequence_button = tk.Button(sequence_dialog, text="Save Sequence",
-                                     command=lambda: save_action_sequence(temp_actions, listbox, selected_item,
-                                                                          sequence_dialog, selected_index))
+                                     command=lambda: save_action_sequence(temp_actions, listbox, selected_item, sequence_dialog, selected_index))
     save_sequence_button.pack(pady=10)
 
     sequence_dialog.protocol("WM_DELETE_WINDOW", lambda: on_close(sequence_dialog, temp_actions, app, decrypted_in_session))
 
-def add_selected_action(actions_listbox, temp_actions, selected_action):
+def record_mouse_actions(actions_listbox, temp_actions):
+    last_position = None  # To track the last significant position
+    
+    def on_move(x, y):
+        """Track significant mouse movements but do not add them until a click happens."""
+        nonlocal last_position
+        if last_position is None or (abs(x - last_position[0]) > 50 or abs(y - last_position[1]) > 50):
+            last_position = (x, y)  # Update last significant position
+
+    def on_click(x, y, button, pressed):
+        """Record mouse clicks and optionally include movement before them."""
+        nonlocal last_position
+        if pressed:
+            click_type = "left" if button == mouse.Button.left else "right"
+            
+            # Add a Mouse Move action to the last significant position if it exists
+            if last_position:
+                action_move = {
+                    "type": "Mouse Move",
+                    "position": last_position
+                }
+                temp_actions.append(action_move)
+                actions_listbox.insert(tk.END, f"Move to ({last_position[0]}, {last_position[1]})")
+                print(f"Mouse moved to ({last_position[0]}, {last_position[1]}) recorded.")
+            
+            # Add the actual click action
+            action_click = {
+                "type": "Mouse Clicks",
+                "position": (x, y),
+                "click_type": click_type
+            }
+            temp_actions.append(action_click)
+            actions_listbox.insert(tk.END, f"{click_type.capitalize()} Click at ({x}, {y})")
+            print(f"{click_type.capitalize()} Click at ({x}, {y}) recorded.")
+            
+            # Update the last position to the click position
+            last_position = (x, y)
+
+    def stop_recording():
+        """Stop the listener and unbind hotkeys."""
+        listener.stop()
+        keyboard.unhook_all_hotkeys()
+        print("Stopped mouse recording mode.")
+
+    # Start the listener for both movement and clicks
+    listener = Listener(on_move=on_move, on_click=on_click)
+    listener.start()
+
+    # Hotkey to stop the recording
+    keyboard.add_hotkey("ctrl+q", stop_recording)
+    print("Mouse recording started. Press Ctrl+Q to stop.")
+
+def add_selected_action(actions_listbox, temp_actions, selected_action, sequence_dialog=None):
     action_type = selected_action.get()
     if action_type in ["Input Field", "Password", "Sleep"]:
         open_input_dialog(action_type, actions_listbox, temp_actions)
+    elif action_type == "Mouse Clicks":
+        # Start recording mouse movements and clicks
+        record_mouse_actions(actions_listbox, temp_actions)
     else:
-        action = {"type": action_type}
-        if action_type == "Password":
-            password = input_field.get().strip()  # Get the password
-            encrypted_password = encrypt_password(password)  # Encrypt the password before saving
-            action["value"] = encrypted_password
-            action["decrypted_in_session"] = True  # Mark this action as decrypted for session
-
+        action = {"type": action_type, "decrypted_in_session": False}
         temp_actions.append(action)
         actions_listbox.insert(tk.END, display_action_text(action))
-
+            
 def open_input_dialog(action_type, actions_listbox, temp_actions):
     input_dialog = tk.Toplevel(root)
     input_dialog.title(f"Enter {action_type} Value")
@@ -620,7 +722,7 @@ def open_input_dialog(action_type, actions_listbox, temp_actions):
     def submit_action():
         value = input_field.get().strip()
         if value:
-            action = {"type": action_type, "value": value}
+            action = {"type": action_type, "value": value, "decrypted_in_session": action_type == "Password"}
             temp_actions.append(action)
             actions_listbox.insert(tk.END, display_action_text(action))
             input_dialog.destroy()
@@ -649,8 +751,9 @@ def save_action_sequence(temp_actions, listbox, selected_item, sequence_dialog, 
     app = next((item for item in apps if item.get("name", item["path"]) == selected_item), None)
     if app:
         for action in temp_actions:
-            if action["type"] == "Password":
+            if action["type"] == "Password" and action.get("decrypted_in_session"):
                 action["value"] = encrypt_password(action["value"])
+                action["decrypted_in_session"] = False  # Reset after encrypting
 
         app["actions"] = temp_actions[:]
         log_message(f"Action sequence saved for {selected_item}")
@@ -670,9 +773,8 @@ def on_close(sequence_dialog, temp_actions, app, decrypted_in_session):
                 action["value"] = encrypt_password(action["value"])
                 action["decrypted_in_session"] = False  # Reset the flag after re-encryption
 
-    # Close the dialog without saving any changes
     sequence_dialog.destroy()
-    
+
 # Example of adding the save_password function to the context menu
 def show_context_menu(event, listbox):
     context_menu = tk.Menu(root, tearoff=0)
