@@ -1,11 +1,10 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk, font as tkfont, PhotoImage, Toplevel, Label
+from tkinter import filedialog, messagebox, simpledialog, ttk, font as tkfont, PhotoImage
 from tkinterdnd2 import TkinterDnD, DND_FILES, DND_TEXT
 import json, subprocess, os, sys, winshell, re, time, winreg, pyautogui
 from cryptography.fernet import Fernet
 from pynput import mouse
 from pynput.mouse import Listener
-import threading
 import keyboard
 
 # Generate and save encryption key if it doesn't exist
@@ -71,7 +70,7 @@ def open_application(app_path, args=None):
         # Launch the application
         if os.path.isdir(app_path):  # Open folder
             os.startfile(app_path)
-            time.sleep(3)
+            time.sleep(1.3)
             
             # Execute each action in the sequence
             for action in actions:
@@ -99,51 +98,76 @@ def open_application(app_path, args=None):
 
 def execute_action(action):
     action_type = action.get("type")
-    position = action.get("position", (0, 0))
-    click_type = action.get("click_type", "left")
+    position = action.get("position", None)  # Position for mouse actions
+    click_type = action.get("click_type", "left")  # Default to left click
 
-    print(f"Executing action: {action_type} at {position}")
+    print(f"Executing action: {action_type} with details: {action}")
 
-    if action_type == "Mouse Move":
-        # Move the mouse to the position
-        pyautogui.moveTo(position[0], position[1], duration=0.2)  # Smooth movement
+    if action_type == "Mouse Move" and position:
+        # Move the mouse to the specified position
+        pyautogui.moveTo(position[0], position[1], duration=0.2)
         print(f"Moved mouse to {position}")
-    elif action_type == "Mouse Clicks":
-        # Move to position and click
+
+    elif action_type == "Mouse Clicks" and position:
+        # Perform a click at the specified position
         pyautogui.moveTo(position[0], position[1], duration=0.2)
         if click_type == "left":
             pyautogui.click()
-        else:
+            print(f"Left click at {position}")
+        elif click_type == "right":
             pyautogui.rightClick()
-        print(f"{click_type.capitalize()} click at {position}")
+            print(f"Right click at {position}")
+
     elif action_type == "Password":
         decrypted_password = decrypt_password(action.get("value", ""))
         pyautogui.write(decrypted_password)
         print("Typed password")
+
     elif action_type == "Tab":
         pyautogui.press("tab")
+        print("Pressed Tab")
+
     elif action_type == "Enter":
         pyautogui.press("enter")
+        print("Pressed Enter")
+
     elif action_type == "Input Field":
         pyautogui.write(action.get("value", ""))
+        print(f"Typed input: {action.get('value', '')}")
+
     elif action_type == "Sleep":
         time.sleep(int(action.get("value", 1)))
+        print(f"Paused for {action.get('value', 1)} seconds")
+
     elif action_type == "Escape":
         pyautogui.press("esc")
+        print("Pressed Escape")
+
     elif action_type == "Space":
         pyautogui.press("space")
+        print("Pressed Space")
+
     elif action_type == "Left Arrow":
         pyautogui.press("left")
+        print("Pressed Left Arrow")
+
     elif action_type == "Right Arrow":
         pyautogui.press("right")
+        print("Pressed Right Arrow")
+
     elif action_type == "Up Arrow":
         pyautogui.press("up")
+        print("Pressed Up Arrow")
+
     elif action_type == "Down Arrow":
         pyautogui.press("down")
+        print("Pressed Down Arrow")
+
     elif action_type == "Full Screen":
         pyautogui.hotkey("win", "up")
+        print("Set window to full screen")
 
-    time.sleep(0.5)  # Small delay between actions
+    time.sleep(0.8)  # Add a delay between actions
 
 def load_saved_data():
     if os.path.exists(SAVE_FILE):
@@ -369,42 +393,70 @@ def run_all():
             except Exception as e:
                 log_message(f"Failed to open URL {item['path']}: {e}")
 
+def run_selected(listbox):
+    selected_indices = listbox.curselection()
+    if not selected_indices:
+        log_message("No items selected to run.")
+        return
+
+    browser_path = get_default_browser_path()
+    first_url = True  # To handle the first URL as a new window
+
+    for selected_index in selected_indices:
+        selected_item = listbox.get(selected_index)
+        selected_app = next((item for item in apps if item.get("name", item["path"]) == selected_item), None)
+
+        if selected_app:
+            if selected_app["type"] == "application" or selected_app["type"] == "folder":
+                open_application(selected_app["path"])
+            elif selected_app["type"] == "url":
+                try:
+                    if first_url:
+                        subprocess.Popen([browser_path, "--new-window", selected_app["path"]])
+                        first_url = False
+                        time.sleep(0.1)
+                    else:
+                        subprocess.Popen([browser_path, "--new-tab", selected_app["path"]])
+                    log_message(f"Opened URL: {selected_app['path']}")
+                except Exception as e:
+                    log_message(f"Failed to open URL {selected_app['path']}: {e}")
+        else:
+            log_message(f"Selected item '{selected_item}' not found in the app list.")
+
 def delete_selected_application():
     global changes_made
     selected_indices = app_listbox.curselection()
     if selected_indices:
-        for index in reversed(selected_indices):  # Reverse to handle index shifts
-            display_name = app_listbox.get(index)
-            print(f"Deleting from app_listbox: {display_name}")  # Debug: Check name in listbox
-            # Remove from Listbox
-            app_listbox.delete(index)
-            # Remove from apps list by matching display_name
-            before_delete_apps = apps[:]
-            apps[:] = [app for app in apps if app.get("name", app["path"]) != display_name]
-            after_delete_apps = apps[:]
-            print(f"Apps before deletion: {before_delete_apps}")  # Debug: Apps list before deletion
-            print(f"Apps after deletion: {after_delete_apps}")  # Debug: Apps list after deletion
+        # Reverse the indices to avoid shifting issues during deletion
+        selected_indices = sorted(selected_indices, reverse=True)
+
+        # Remove from `apps` by matching the indices in the `apps` list
+        for index in selected_indices:
+            # Remove the corresponding app at the same index
+            del apps[index]
+            app_listbox.delete(index)  # Also remove from the listbox
+
         changes_made = True
         log_message("Selected application(s) deleted.")
+        print(f"Remaining apps: {apps}")  # Debug output
 
 def delete_selected_url():
     global changes_made
     selected_indices = url_listbox.curselection()
     if selected_indices:
-        for index in reversed(selected_indices):  # Reverse to handle index shifts
-            display_name = url_listbox.get(index)
-            print(f"Deleting from url_listbox: {display_name}")  # Debug: Check name in listbox
-            
-            # Remove from Listbox
-            url_listbox.delete(index)
-            
-            # Remove from apps list by matching the display_name or path
-            before_delete_apps = apps[:]
-            apps[:] = [app for app in apps if app.get("name", app["path"]) != display_name]
-            after_delete_apps = apps[:]
-            
+        # Reverse the indices to avoid shifting issues during deletion
+        selected_indices = sorted(selected_indices, reverse=True)
+
+        # Remove from `apps` by matching the indices in the `apps` list
+        for index in selected_indices:
+            # Remove the corresponding URL at the same index
+            del apps[index]
+            url_listbox.delete(index)  # Also remove from the listbox
+
         changes_made = True
         log_message("Selected URL(s) deleted.")
+        print(f"Remaining apps: {apps}")  # Debug output
+
 
 def on_drop_file(event, listbox, item_type):
     global changes_made
@@ -532,7 +584,6 @@ def rename_item(event, listbox, item_type):
     path_display.insert(0, original_path)
     path_display.pack(pady=5, fill=tk.X)
 
-
     style = ttk.Style()
     style.configure('ReadOnly.TEntry', fieldbackground='#D3D3D3', foreground='black')
     # Apply the style to the path_display entry
@@ -645,31 +696,36 @@ def open_action_sequence_dialog(listbox):
     sequence_dialog.protocol("WM_DELETE_WINDOW", lambda: on_close(sequence_dialog, temp_actions, app, decrypted_in_session))
 
 def record_mouse_actions(actions_listbox, temp_actions):
-    last_position = None  # To track the last significant position
+    """
+    Record mouse movements and clicks in a single session.
+    """
+    last_position = None  # Track the last significant position
     
     def on_move(x, y):
-        """Track significant mouse movements but do not add them until a click happens."""
+        """
+        Record movement only when the position significantly changes.
+        """
         nonlocal last_position
         if last_position is None or (abs(x - last_position[0]) > 50 or abs(y - last_position[1]) > 50):
-            last_position = (x, y)  # Update last significant position
+            last_position = (x, y)
+            print(f"Mouse moved to ({x}, {y})")  # Log movement for debugging
 
     def on_click(x, y, button, pressed):
-        """Record mouse clicks and optionally include movement before them."""
-        nonlocal last_position
+        """
+        Record a click action at the current position.
+        """
         if pressed:
             click_type = "left" if button == mouse.Button.left else "right"
             
-            # Add a Mouse Move action to the last significant position if it exists
-            if last_position:
-                action_move = {
-                    "type": "Mouse Move",
-                    "position": last_position
-                }
+            # Add a move action only if the position changed significantly
+            nonlocal last_position
+            if last_position and last_position != (x, y):
+                action_move = {"type": "Mouse Move", "position": last_position}
                 temp_actions.append(action_move)
                 actions_listbox.insert(tk.END, f"Move to ({last_position[0]}, {last_position[1]})")
-                print(f"Mouse moved to ({last_position[0]}, {last_position[1]}) recorded.")
+                print(f"Recorded move to ({last_position[0]}, {last_position[1]})")
             
-            # Add the actual click action
+            # Record the click action
             action_click = {
                 "type": "Mouse Clicks",
                 "position": (x, y),
@@ -677,18 +733,20 @@ def record_mouse_actions(actions_listbox, temp_actions):
             }
             temp_actions.append(action_click)
             actions_listbox.insert(tk.END, f"{click_type.capitalize()} Click at ({x}, {y})")
-            print(f"{click_type.capitalize()} Click at ({x}, {y}) recorded.")
+            print(f"Recorded {click_type.capitalize()} Click at ({x}, {y})")
             
-            # Update the last position to the click position
+            # Update last position
             last_position = (x, y)
 
     def stop_recording():
-        """Stop the listener and unbind hotkeys."""
+        """
+        Stop the listener and unbind hotkeys.
+        """
         listener.stop()
         keyboard.unhook_all_hotkeys()
         print("Stopped mouse recording mode.")
 
-    # Start the listener for both movement and clicks
+    # Start the listener for both movements and clicks
     listener = Listener(on_move=on_move, on_click=on_click)
     listener.start()
 
@@ -779,6 +837,7 @@ def on_close(sequence_dialog, temp_actions, app, decrypted_in_session):
 def show_context_menu(event, listbox):
     context_menu = tk.Menu(root, tearoff=0)
     context_menu.add_command(label="Change Name", command=lambda: rename_item(event, listbox, "application"))
+    context_menu.add_command(label="Run Selected", command=lambda: run_selected(listbox))
 
     if listbox == app_listbox:
         context_menu.add_command(label="Edit Action Sequence", command=lambda: open_action_sequence_dialog(listbox))
