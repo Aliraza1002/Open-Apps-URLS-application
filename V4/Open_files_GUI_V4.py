@@ -1,11 +1,52 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk, font as tkfont, PhotoImage
 from tkinterdnd2 import TkinterDnD, DND_FILES, DND_TEXT
-import json, subprocess, os, sys, winshell, re, time, winreg, pyautogui
+import json, subprocess, os, sys, winshell, re, time, winreg, pyautogui, base64, win32security
 from cryptography.fernet import Fernet
 from pynput import mouse
 from pynput.mouse import Listener
-import keyboard
+import keyboard, os, ctypes, smtplib, socket, traceback, wmi, uuid, pygetwindow as gw
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from hashlib import sha256
+
+def add_uuid_to_entry(entry):
+    """
+    Ensures that each entry has a unique identifier (UUID).
+    """
+    if "uuid" not in entry:
+        entry["uuid"] = str(uuid.uuid4())
+    return entry
+
+# Authentication function
+def authenticate_user():
+    current_user = os.getlogin()
+    password = simpledialog.askstring("Authentication Required", f"Enter password for {current_user}:",
+                                       show="*")
+    if not password:
+        messagebox.showerror("Authentication Failed", "No password entered! Exiting application.")
+        raise SystemExit()
+
+    # Validate credentials
+    advapi32 = ctypes.windll.advapi32
+    kernel32 = ctypes.windll.kernel32
+    handle = ctypes.c_void_p()
+
+    success = advapi32.LogonUserW(
+        ctypes.c_wchar_p(current_user),
+        ctypes.c_wchar_p(None),
+        ctypes.c_wchar_p(password),
+        2,  # LOGON32_LOGON_INTERACTIVE
+        0,  # LOGON32_PROVIDER_DEFAULT
+        ctypes.byref(handle)
+    )
+
+    if not success:
+        messagebox.showerror("Authentication Failed", "Invalid password! Exiting application.")
+        raise SystemExit()
+    else:
+        messagebox.showinfo("Authentication Successful", f"Welcome, {current_user}!")
+        kernel32.CloseHandle(handle)
 
 # Generate and save encryption key if it doesn't exist
 def generate_key():
@@ -19,6 +60,11 @@ def load_key():
     with open(KEY_FILE, 'rb') as key_file:
         return key_file.read()
 
+def get_fernet_key():
+    """Create a Fernet key from the machine-specific composite key."""
+    dynamic_key = generate_dynamic_key()
+    return base64.urlsafe_b64encode(dynamic_key[:32])
+
 # Encrypt the password
 def encrypt_password(password):
     fernet = Fernet(load_key())
@@ -29,9 +75,137 @@ def decrypt_password(encrypted_password):
     fernet = Fernet(load_key())
     return fernet.decrypt(encrypted_password.encode()).decode()
 
+def encrypt_json(data):
+    """Encrypt JSON data with a machine-specific key."""
+    fernet = Fernet(get_fernet_key())
+    json_data = json.dumps(data)
+    return fernet.encrypt(json_data.encode()).decode()
+
+def decrypt_json(encrypted_data):
+    """Decrypt JSON data with a machine-specific key."""
+    fernet = Fernet(get_fernet_key())
+    decrypted_data = fernet.decrypt(encrypted_data.encode()).decode()
+    return json.loads(decrypted_data)
+
+def get_machine_sid():
+    """Get the machine SID for tying JSON to a specific machine."""
+    sid_obj, _, _ = win32security.LookupAccountName(None, os.getlogin())
+    return win32security.ConvertSidToStringSid(sid_obj)
+def get_processor_id():
+    """Fetch the CPU ID for the current machine."""
+    try:
+        w = wmi.WMI()
+        for processor in w.Win32_Processor():
+            return processor.ProcessorId.strip()
+    except Exception as e:
+        print(f"Error fetching processor ID: {e}")
+        return None
+
+def get_disk_serial_number():
+    """Retrieve the serial number of the system drive."""
+    try:
+        output = subprocess.check_output("wmic diskdrive get SerialNumber", shell=True)
+        serial = output.decode().split("\n")[1].strip()
+        return serial
+    except Exception as e:
+        print(f"Error fetching disk serial number: {e}")
+        return None
+
+def get_os_uuid():
+    """Retrieve the OS installation UUID."""
+    try:
+        output = subprocess.check_output("wmic csproduct get UUID", shell=True)
+        uuid = output.decode().split("\n")[1].strip()
+        return uuid
+    except Exception as e:
+        print(f"Error fetching OS UUID: {e}")
+        return None
+
+def generate_dynamic_key():
+    """Generate a machine-specific encryption key."""
+    machine_sid = get_machine_sid()
+    processor_id = get_processor_id()
+    disk_serial = get_disk_serial_number()
+    os_uuid = get_os_uuid()
+
+    composite_string = f"{machine_sid}{processor_id}{disk_serial}{os_uuid}"
+    return sha256(composite_string.encode()).digest()
+
+def send_alert_email(subject, body):
+    """Send an alert email for unauthorized JSON access."""
+    sender_email = "alirazatc.0012@gmail.com"
+    receiver_email = "aliraza_159@outlook.com"
+    password = "bfjd nmcc ceji ulcp"
+
+    try:
+        # Create MIME message
+        message = MIMEMultipart()
+        # Mask the sender email with a display name
+        message["From"] = "Auto Launch Application Alert"
+        message["To"] = receiver_email
+        message["Subject"] = subject
+        message["Importance"] = "High"
+
+        # HTML content for better formatting
+        html_content = f"""
+        <html>
+        <body style="font-family: Arial, sans-serif;">
+            <h2 style="color: red; text-align: center;">Unauthorized Access Detected</h2>
+            <p>
+                <strong>Details of the unauthorized access attempt:</strong>
+            </p>
+            <pre style="
+                background-color: #f9f9f9;
+                padding: 10px;
+                border: 1px solid #ddd;
+                font-family: Courier, monospace;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+            ">
+            {body}
+            </pre>
+            <p>
+                Please take immediate action to investigate this issue.
+            </p>
+        </body>
+        </html>
+        """
+        message.attach(MIMEText(html_content, "html"))
+
+        # Connect to Gmail's SMTP server with STARTTLS
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()  # Upgrade to secure connection
+            server.login(sender_email, password)  # Login with the Gmail app password
+            server.sendmail(sender_email, receiver_email, message.as_string())
+        
+        log_message("Alert email sent successfully.")
+    except Exception as e:
+        log_message(f"Failed to send email. Error: {e}")
+
+
+def get_system_info():
+    """Collect system information to include in the alert email."""
+    username = os.getlogin()
+    machine_name = socket.gethostname()
+    ip_address = socket.gethostbyname(machine_name)
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+
+    return f"""
+    Username: {username}
+    Machine Name: {machine_name}
+    IP Address: {ip_address}
+    Timestamp: {timestamp}
+    """
+
+def alert_on_invalid_json():
+    """Send an alert email for unauthorized JSON access."""
+    subject = "Unauthorized Access Detected"
+    body = get_system_info()
+    send_alert_email(subject, body)
+    
 # File to save application & URL paths
-user_appdata = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Auto Launch Interface V2")
-SAVE_FILE = os.path.join(user_appdata, "application_configurations.json")
+user_appdata = os.path.join(os.path.expanduser("~"), "AppData", "Local", "ALI - TEST")
+SAVE_FILE = os.path.join(user_appdata, "application_configurations_test.dat")
 KEY_FILE = os.path.join(user_appdata, "secret.key")
 
 # Create the directory if it doesn't exist
@@ -55,46 +229,62 @@ def log_message(message):
     log_text.insert(tk.END, message + "\n")
     log_text.config(state=tk.DISABLED)
 
-def open_application(app_path, args=None):
+def open_application(app_uuid, args=None, first_url=True):
     try:
-        # Get the start-in path from the app data
+        # Locate the app entry using the UUID
+        app_entry = next((item for item in apps if item["uuid"] == app_uuid), None)
+        if not app_entry:
+            log_message(f"App with ID '{app_uuid}' not found.")
+            return
+
+        app_path = app_entry["path"]
         start_in = start_in_paths.get(app_path, os.path.dirname(app_path))
+        actions = app_entry.get("actions", [])
 
-        # Retrieve the app entry and associated actions
-        app_entry = next((item for item in apps if item["path"] == app_path), None)
-        actions = app_entry.get("actions", []) if app_entry else []
-
-        if app_path.endswith(".lnk"):  # Resolve shortcut files
-            app_path = winshell.shortcut(app_path).path
-
-        # Launch the application
-        if os.path.isdir(app_path):  # Open folder
+        # Handle URLs
+        if app_entry["type"] == "url":
+            browser_path = get_default_browser_path()
+            try:
+                if first_url:
+                    subprocess.Popen([browser_path, "--new-window", app_path])
+                else:
+                    subprocess.Popen([browser_path, "--new-tab", app_path])
+                time.sleep(1)  # Brief delay for the browser to load
+                log_message(f"Opened URL: {app_path}")
+            except Exception as e:
+                log_message(f"Failed to open URL {app_path}: {e}")
+        # Handle folders and applications
+        elif app_entry["type"] == "folder":
             os.startfile(app_path)
             time.sleep(1.3)
-            
-            # Execute each action in the sequence
-            for action in actions:
-                execute_action(action)
-                
-        elif app_path.endswith(".exe"):  # Run executable
+        elif app_path.endswith(".exe"):
             if args:
                 subprocess.Popen([app_path] + args, cwd=start_in)
             else:
                 subprocess.Popen(app_path, cwd=start_in)
-            time.sleep(2)  # Wait briefly for the app to load
+            time.sleep(2)
 
-            # Execute each action in the sequence
-            for action in actions:
-                execute_action(action)
-
-        else:
-            os.startfile(app_path)  # Open non-executable file or URL
-            time.sleep(3)
+        # Execute actions for all types
+        for action in actions:
+            execute_action(action)
 
         log_message(f"Successfully opened {app_path}")
 
     except Exception as e:
         log_message(f"Failed to open {app_path}: {e}")
+
+def is_window_maximized(window_title):
+    """
+    Check if the window with the given title is maximized.
+    """
+    try:
+        window = next(win for win in gw.getWindowsWithTitle(window_title) if win.title.strip())
+        return window.isMaximized
+    except StopIteration:
+        return False  # No matching window found
+    except Exception as e:
+        print(f"Error checking window state: {e}")
+        return False
 
 def execute_action(action):
     action_type = action.get("type")
@@ -104,12 +294,10 @@ def execute_action(action):
     print(f"Executing action: {action_type} with details: {action}")
 
     if action_type == "Mouse Move" and position:
-        # Move the mouse to the specified position
         pyautogui.moveTo(position[0], position[1], duration=0.2)
         print(f"Moved mouse to {position}")
 
     elif action_type == "Mouse Clicks" and position:
-        # Perform a click at the specified position
         pyautogui.moveTo(position[0], position[1], duration=0.2)
         if click_type == "left":
             pyautogui.click()
@@ -164,40 +352,78 @@ def execute_action(action):
         print("Pressed Down Arrow")
 
     elif action_type == "Full Screen":
-        pyautogui.hotkey("win", "up")
-        print("Set window to full screen")
+        # Check if the window is already maximized
+        current_window_title = gw.getActiveWindow().title
+        if not is_window_maximized(current_window_title):
+            pyautogui.hotkey("win", "up")
+            print("Set window to full screen")
+        else:
+            print("Window is already in full screen")
 
     time.sleep(0.8)  # Add a delay between actions
-
+    
 def load_saved_data():
-    if os.path.exists(SAVE_FILE):
-        try:
-            with open(SAVE_FILE, 'r') as file:
-                data = json.load(file)
-                
-                for item in data:
-                    # Only decrypt if the password is marked as encrypted
-                    if "password" in item and item.get("is_encrypted", False):
-                        item["password"] = decrypt_password(item["password"])
-                        item["is_encrypted"] = False  # Set flag to indicate it's now decrypted
+    """Load and validate saved application data."""
+    if not os.path.exists(SAVE_FILE):
+        return []
 
-                    display_name = item["name"] if item.get("name") else item["path"]
-                    if item["type"] in ["application", "folder"]:
-                        app_listbox.insert(tk.END, display_name)
-                        start_in_paths[item["path"]] = item.get("start_in", "")
-                    elif item["type"] == "url":
-                        url_listbox.insert(tk.END, display_name)
-                
-                apps.extend(data)
-                return data
-        except json.JSONDecodeError:
-            log_message("Error loading data: Invalid JSON format.")
-            return []  # Return an empty list on JSON error
-        except Exception as e:
-            log_message(f"Error loading saved data: {e}")
-            return []  # Return an empty list if other errors occur
-    else:
-        return []  # Return an empty list if the file does not exist
+    try:
+        with open(SAVE_FILE, 'r') as file:
+            encrypted_data = file.read()
+
+        # Decrypt JSON data
+        try:
+            data = decrypt_json(encrypted_data)
+        except Exception:
+            messagebox.showerror(
+                "Access Denied",
+                "Failed to decrypt JSON file. This file does not belong to this machine."
+            )
+            alert_on_invalid_json()
+            raise SystemExit()
+
+        # Validate JSON metadata
+        try:
+            validate_metadata(data.get("_metadata", {}))
+        except ValueError as validation_error:
+            alert_on_invalid_json()
+            messagebox.showerror("Access Denied", str(validation_error))
+            raise SystemExit()
+
+        # Process and load items into the application
+        items = data.get("items", [])
+        for item in items:
+            item = add_uuid_to_entry(item)  # Ensure every item has a UUID
+            if "password" in item and item.get("is_encrypted", False):
+                item["password"] = decrypt_password(item["password"])
+                item["is_encrypted"] = False
+
+            display_name = item.get("name", item["path"])
+            if item["type"] in ["application", "folder"]:
+                app_listbox.insert(tk.END, display_name)
+                start_in_paths[item["path"]] = item.get("start_in", "")
+            elif item["type"] == "url":
+                url_listbox.insert(tk.END, display_name)
+
+            apps.append(item)  # Add the item (with UUID and actions) to the apps list
+        return items
+
+    except SystemExit:
+        raise
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to load data: {e}")
+        raise SystemExit()
+
+def validate_metadata(metadata):
+    """Validate the JSON metadata against the current machine and user."""
+    if (
+        metadata.get("created_by") != os.getlogin() or
+        metadata.get("machine_sid") != get_machine_sid() or
+        metadata.get("cpu_id") != get_processor_id() or
+        metadata.get("disk_serial") != get_disk_serial_number() or
+        metadata.get("os_uuid") != get_os_uuid()
+    ):
+        raise ValueError("This JSON file was not created on this machine.")
 
 def save_data(data):
     encrypted_data = []  # Temporarily hold encrypted items for saving
@@ -240,27 +466,40 @@ def add_application():
     global changes_made
     file_path = filedialog.askopenfilename()
     if file_path:
+        unique_id = str(uuid.uuid4())  # Generate a unique ID for the item
+
+        # Get the base display name
+        display_name = os.path.basename(file_path)
+        original_name = display_name
+        counter = 1
+
+        # Check for existing names in apps to avoid duplicates
+        while any(item['name'] == display_name for item in apps):
+            display_name = f"{original_name} ({counter})"
+            counter += 1
+            
+        # Insert the display name into the listbox
+        app_listbox.insert(tk.END, display_name)
+        
+        # Add the app with its unique ID and other details
         if file_path.endswith(".lnk"):  # If it's a shortcut
             target_path, start_in_path = get_shortcut_details(file_path)
-            display_name = os.path.basename(target_path)  # Use the name from the file
-            app_listbox.insert(tk.END, display_name)
-            apps.append({"type": "application", "path": target_path, "start_in": start_in_path, "name": display_name})
-            log_message(f"Added shortcut: {target_path} with Start-In: {start_in_path}")
+            apps.append({"uuid": unique_id, "type": "application", "path": target_path, "start_in": start_in_path, "name": display_name})
+            log_message(f"Added shortcut: {display_name} with Start-In: {start_in_path}")
+
         elif file_path.endswith(".exe"):  # If it's an executable
             target_path = file_path
             start_in_path = os.path.dirname(file_path)
-            display_name = os.path.basename(target_path)  # Use the name from the file
-            app_listbox.insert(tk.END, display_name)
-            apps.append({"type": "application", "path": target_path, "start_in": start_in_path, "name": display_name})
-            log_message(f"Added executable: {target_path} with Start-In: {start_in_path}")
+            apps.append({"uuid": unique_id, "type": "application", "path": target_path, "start_in": start_in_path, "name": display_name})
+            log_message(f"Added executable: {display_name}")
+
         else:  # Other file types
             target_path = file_path
             start_in_path = ""
-            display_name = os.path.basename(target_path)  # Use the name from the file
-            app_listbox.insert(tk.END, display_name)
-            apps.append({"type": "application", "path": target_path, "start_in": start_in_path, "name": display_name})
-            log_message(f"Added file: {target_path}.")
+            apps.append({"uuid": unique_id, "type": "application", "path": target_path, "start_in": start_in_path, "name": display_name})
+            log_message(f"Added file: {display_name}")
 
+        # Mark changes made
         changes_made = True
 
 def add_folder():
@@ -268,31 +507,78 @@ def add_folder():
     folder_path = filedialog.askdirectory()
     if folder_path:
         display_name = os.path.basename(folder_path)
+        original_name = display_name
+        counter = 1
+
+        while any(item['name'] == display_name for item in apps):
+            display_name = f"{original_name} ({counter})"
+            counter += 1
+
         app_listbox.insert(tk.END, display_name)
-        apps.append({"type": "folder", "path": folder_path, "start_in": "", "name": display_name})
-        log_message(f"Added folder: {folder_path}")
+        apps.append(add_uuid_to_entry({"type": "folder", "path": folder_path, "start_in": "", "name": display_name}))
+        log_message(f"Added folder: {display_name}")
         changes_made = True
+
 
 def add_url():
     global changes_made
     url = url_entry.get()
     if url:
         if validate_url(url):
-            display_name = url  # Use the URL itself as the name
+            display_name = url
+            original_name = display_name
+            counter = 1
+
+            # Check for existing names in apps to avoid duplicates
+            while any(item['name'] == display_name for item in apps):
+                display_name = f"{original_name} ({counter})"
+                counter += 1
+
+            # Insert the display name into the listbox
             url_listbox.insert(tk.END, display_name)
-            apps.append({"type": "url", "path": url, "name": display_name})  # Ensure name is set
+            apps.append(add_uuid_to_entry({"type": "url", "path": url, "name": display_name}))  # Ensure name is set
             url_entry.delete(0, tk.END)
-            log_message(f"Added URL: {url}")
+            log_message(f"Added URL: {display_name}")
             changes_made = True
         else:
             log_message(f"Invalid URL: {url}")
             messagebox.showerror("Invalid URL", "The URL provided is invalid.")
 
+
 def save_paths():
-    global changes_made
-    save_data(apps)
-    log_message("Applications, folders, and URLs saved!")
-    changes_made = False
+    """Save application data with machine-specific metadata."""
+    global changes_made  # Access the global changes_made flag
+
+    try:
+        # Fetch machine-specific identifiers
+        machine_sid = get_machine_sid()
+        processor_id = get_processor_id()
+        disk_serial = get_disk_serial_number()
+        os_uuid = get_os_uuid()
+
+        # Prepare metadata
+        data_to_save = {
+            "items": apps,  # List of applications
+            "_metadata": {
+                "created_by": os.getlogin(),
+                "machine_sid": machine_sid,
+                "cpu_id": processor_id,
+                "disk_serial": disk_serial,
+                "os_uuid": os_uuid
+            }
+        }
+
+        # Encrypt and save
+        encrypted_data = encrypt_json(data_to_save)
+        with open(SAVE_FILE, 'w') as file:
+            file.write(encrypted_data)
+
+        # Reset changes_made flag after successful save
+        changes_made = False
+        log_message("Data saved successfully!")
+    except Exception as e:
+        log_message(f"Failed to save data: {e}")
+        messagebox.showerror("Error", f"Failed to save data: {e}")
 
 def load_paths():
     saved_data = load_saved_data()
@@ -368,7 +654,6 @@ def get_default_browser_path():
                     opera_path = os.path.join(base, "Opera", "launcher.exe")
                     if os.path.isfile(opera_path):
                         return opera_path
-
         # If no browser found
         return None
     except Exception as e:
@@ -376,22 +661,13 @@ def get_default_browser_path():
         return None
 
 def run_all():
-    browser_path = get_default_browser_path()
-    first_url = True
+    first_url = True  # To handle the first URL as a new window
+
     for item in apps:
-        if item["type"] == "application" or item["type"] == "folder":
-            open_application(item["path"])
-        elif item["type"] == "url":
-            try:
-                if first_url:
-                    subprocess.Popen([browser_path, "--new-window", item["path"]])
-                    first_url = False
-                    time.sleep(0.1)
-                else:
-                    subprocess.Popen([browser_path, "--new-tab", item["path"]])
-                log_message(f"Opened URL: {item['path']}")
-            except Exception as e:
-                log_message(f"Failed to open URL {item['path']}: {e}")
+        if item["type"] in ["application", "folder", "url"]:
+            open_application(item["uuid"], first_url=first_url)
+            if item["type"] == "url":
+                first_url = False  # Switch to opening new tabs after the first URL
 
 def run_selected(listbox):
     selected_indices = listbox.curselection()
@@ -399,27 +675,18 @@ def run_selected(listbox):
         log_message("No items selected to run.")
         return
 
-    browser_path = get_default_browser_path()
-    first_url = True  # To handle the first URL as a new window
+    first_url = True  # Handle the first URL as a new window
 
     for selected_index in selected_indices:
         selected_item = listbox.get(selected_index)
-        selected_app = next((item for item in apps if item.get("name", item["path"]) == selected_item), None)
+
+        # Find the corresponding app entry from the `apps` list
+        selected_app = next((item for item in apps if item.get("name") == selected_item or item.get("path") == selected_item), None)
 
         if selected_app:
-            if selected_app["type"] == "application" or selected_app["type"] == "folder":
-                open_application(selected_app["path"])
-            elif selected_app["type"] == "url":
-                try:
-                    if first_url:
-                        subprocess.Popen([browser_path, "--new-window", selected_app["path"]])
-                        first_url = False
-                        time.sleep(0.1)
-                    else:
-                        subprocess.Popen([browser_path, "--new-tab", selected_app["path"]])
-                    log_message(f"Opened URL: {selected_app['path']}")
-                except Exception as e:
-                    log_message(f"Failed to open URL {selected_app['path']}: {e}")
+            open_application(selected_app["uuid"], first_url=first_url)
+            if selected_app["type"] == "url":
+                first_url = False  # Open subsequent URLs in new tabs
         else:
             log_message(f"Selected item '{selected_item}' not found in the app list.")
 
@@ -430,16 +697,17 @@ def delete_selected_application():
         # Reverse the indices to avoid shifting issues during deletion
         selected_indices = sorted(selected_indices, reverse=True)
 
-        # Remove from `apps` by matching the indices in the `apps` list
+        # Remove from `apps` by matching UUIDs
         for index in selected_indices:
-            # Remove the corresponding app at the same index
-            del apps[index]
-            app_listbox.delete(index)  # Also remove from the listbox
+            selected_item = app_listbox.get(index)
+            app_entry = next((app for app in apps if app["name"] == selected_item), None)
+            if app_entry:
+                apps.remove(app_entry)  # Remove the matching app
+                app_listbox.delete(index)  # Also remove from the listbox
 
         changes_made = True
         log_message("Selected application(s) deleted.")
-        print(f"Remaining apps: {apps}")  # Debug output
-
+        
 def delete_selected_url():
     global changes_made
     selected_indices = url_listbox.curselection()
@@ -447,16 +715,16 @@ def delete_selected_url():
         # Reverse the indices to avoid shifting issues during deletion
         selected_indices = sorted(selected_indices, reverse=True)
 
-        # Remove from `apps` by matching the indices in the `apps` list
+        # Remove from `apps` by matching UUIDs
         for index in selected_indices:
-            # Remove the corresponding URL at the same index
-            del apps[index]
-            url_listbox.delete(index)  # Also remove from the listbox
+            selected_item = url_listbox.get(index)
+            url_entry = next((app for app in apps if app["name"] == selected_item), None)
+            if url_entry:
+                apps.remove(url_entry)  # Remove the matching URL
+                url_listbox.delete(index)  # Also remove from the listbox
 
         changes_made = True
         log_message("Selected URL(s) deleted.")
-        print(f"Remaining apps: {apps}")  # Debug output
-
 
 def on_drop_file(event, listbox, item_type):
     global changes_made
@@ -468,9 +736,19 @@ def on_drop_file(event, listbox, item_type):
                 url = 'https://' + url
             
             if validate_url(url):  # Ensure it's a valid URL
-                listbox.insert(tk.END, url)
-                apps.append({"type": item_type, "path": url, "start_in": ""})
-                log_message(f"Added URL: {url}.")
+                # Add counter logic for duplicates
+                original_name = url
+                counter = 1
+                display_name = original_name
+
+                while any(item['name'] == display_name for item in apps):
+                    display_name = f"{original_name} ({counter})"
+                    counter += 1
+
+                entry = add_uuid_to_entry({"type": "url", "path": url, "name": display_name})
+                listbox.insert(tk.END, display_name)
+                apps.append(entry)
+                log_message(f"Added URL: {display_name}")
             else:
                 log_message(f"Invalid URL: {url}")
             return
@@ -479,22 +757,51 @@ def on_drop_file(event, listbox, item_type):
         if item_type == "application":
             if path.endswith(".lnk"):  # If it's a shortcut
                 target_path, start_in_path = get_shortcut_details(path)
-                listbox.insert(tk.END, target_path)
-                apps.append({"type": item_type, "path": target_path, "start_in": start_in_path})
-                log_message(f"Added shortcut: {target_path} with Start-In: {start_in_path}")
+                # Add counter logic for duplicates
+                original_name = os.path.basename(target_path)
+                counter = 1
+                display_name = original_name
+
+                while any(item['name'] == display_name for item in apps):
+                    display_name = f"{original_name} ({counter})"
+                    counter += 1
+
+                entry = add_uuid_to_entry({"type": item_type, "path": target_path, "start_in": start_in_path, "name": display_name})
+                listbox.insert(tk.END, display_name)
+                apps.append(entry)
+                log_message(f"Added shortcut: {display_name} with Start-In: {start_in_path}")
             elif path.endswith(".exe"):  # If it's an executable
                 target_path = path
                 start_in_path = os.path.dirname(path)  # Set Start-In to the directory of the executable
-                listbox.insert(tk.END, target_path)
-                apps.append({"type": item_type, "path": target_path, "start_in": start_in_path})
-                log_message(f"Added executable: {target_path} with Start-In: {start_in_path}")
+                # Add counter logic for duplicates
+                original_name = os.path.basename(target_path)
+                counter = 1
+                display_name = original_name
+
+                while any(item['name'] == display_name for item in apps):
+                    display_name = f"{original_name} ({counter})"
+                    counter += 1
+
+                entry = add_uuid_to_entry({"type": item_type, "path": target_path, "start_in": start_in_path, "name": display_name})
+                listbox.insert(tk.END, display_name)
+                apps.append(entry)
+                log_message(f"Added executable: {display_name} with Start-In: {start_in_path}")
             else:  # Not a shortcut or executable, just add it without a Start-In
                 target_path = path
-                start_in_path = ""  # No Start-In required
-                listbox.insert(tk.END, target_path)
-                apps.append({"type": item_type, "path": target_path, "start_in": start_in_path})
-                log_message(f"Added file: {target_path}.")
-        
+
+                original_name = os.path.basename(target_path)
+                counter = 1
+                display_name = original_name
+
+                while any(item['name'] == display_name for item in apps):
+                    display_name = f"{original_name} ({counter})"
+                    counter += 1
+
+                entry = add_uuid_to_entry({"type": item_type, "path": target_path, "start_in": "", "name": display_name})
+                listbox.insert(tk.END, display_name)
+                apps.append(entry)
+                log_message(f"Added file: {display_name}")
+
         changes_made = True
 
 def clear_log():
@@ -510,7 +817,6 @@ def set_start_in_path(listbox):
         # Get the currently selected item’s display name
         display_name = listbox.get(selected)
 
-        # Find the corresponding app entry based on display name
         current_start_in = ""
         app_to_update = None
 
@@ -633,8 +939,10 @@ def display_action_text(action):
         return f"Sleep: {action_value} sec"
     elif action_type == "Mouse Clicks":
         return f"{click_type.capitalize()} Click at {position}"
+    elif action_type == "Mouse Move":
+        return f"Move to {position}"
     else:
-        return f"{action_type}: {action_value}"
+        return f"{action_type} {action_value}"
 
 def open_action_sequence_dialog(listbox):
     sequence_dialog = tk.Toplevel(root)
@@ -651,7 +959,7 @@ def open_action_sequence_dialog(listbox):
 
     selected_index = selected_index[0]
     selected_item = listbox.get(selected_index)
-    app = next((item for item in apps if item.get("name", item["path"]) == selected_item), None)
+    app = next((item for item in apps if item.get("name") == selected_item), None)
 
     if app:
         temp_actions.extend(load_decrypted_actions(app.get("actions", [])))
@@ -708,7 +1016,7 @@ def record_mouse_actions(actions_listbox, temp_actions):
         nonlocal last_position
         if last_position is None or (abs(x - last_position[0]) > 50 or abs(y - last_position[1]) > 50):
             last_position = (x, y)
-            print(f"Mouse moved to ({x}, {y})")  # Log movement for debugging
+            print(f"Mouse moved to [{x}, {y}]")  # Log movement for debugging
 
     def on_click(x, y, button, pressed):
         """
@@ -722,8 +1030,8 @@ def record_mouse_actions(actions_listbox, temp_actions):
             if last_position and last_position != (x, y):
                 action_move = {"type": "Mouse Move", "position": last_position}
                 temp_actions.append(action_move)
-                actions_listbox.insert(tk.END, f"Move to ({last_position[0]}, {last_position[1]})")
-                print(f"Recorded move to ({last_position[0]}, {last_position[1]})")
+                actions_listbox.insert(tk.END, f"Move to [{last_position[0]}, {last_position[1]}]")
+                print(f"Recorded move to [{last_position[0]}, {last_position[1]}]")
             
             # Record the click action
             action_click = {
@@ -732,8 +1040,8 @@ def record_mouse_actions(actions_listbox, temp_actions):
                 "click_type": click_type
             }
             temp_actions.append(action_click)
-            actions_listbox.insert(tk.END, f"{click_type.capitalize()} Click at ({x}, {y})")
-            print(f"Recorded {click_type.capitalize()} Click at ({x}, {y})")
+            actions_listbox.insert(tk.END, f"{click_type.capitalize()} Click at [{x}, {y}]")
+            print(f"Recorded {click_type.capitalize()} Click at [{x}, {y}]")
             
             # Update last position
             last_position = (x, y)
@@ -806,18 +1114,17 @@ def move_action(actions_listbox, temp_actions, direction):
             actions_listbox.select_set(new_index)
 
 def save_action_sequence(temp_actions, listbox, selected_item, sequence_dialog, selected_index):
-    app = next((item for item in apps if item.get("name", item["path"]) == selected_item), None)
+    app = next((item for item in apps if item.get("name") == selected_item), None)
     if app:
         for action in temp_actions:
+            # Encrypt passwords only if necessary
             if action["type"] == "Password" and action.get("decrypted_in_session"):
                 action["value"] = encrypt_password(action["value"])
                 action["decrypted_in_session"] = False  # Reset after encrypting
 
-        app["actions"] = temp_actions[:]
+        app["actions"] = temp_actions[:]  # Save the actions
         log_message(f"Action sequence saved for {selected_item}")
 
-        listbox.delete(selected_index)
-        listbox.insert(selected_index, selected_item)
         global changes_made
         changes_made = True
 
@@ -838,9 +1145,9 @@ def show_context_menu(event, listbox):
     context_menu = tk.Menu(root, tearoff=0)
     context_menu.add_command(label="Change Name", command=lambda: rename_item(event, listbox, "application"))
     context_menu.add_command(label="Run Selected", command=lambda: run_selected(listbox))
-
+    context_menu.add_command(label="Edit Action Sequence", command=lambda: open_action_sequence_dialog(listbox))
     if listbox == app_listbox:
-        context_menu.add_command(label="Edit Action Sequence", command=lambda: open_action_sequence_dialog(listbox))
+#        context_menu.add_command(label="Edit Action Sequence", command=lambda: open_action_sequence_dialog(listbox))
         context_menu.add_command(label="Set Start In Path", command=lambda: set_start_in_path(listbox))
 
     context_menu.post(event.x_root, event.y_root)
@@ -904,9 +1211,6 @@ add_folder_button.pack(fill=tk.X)
 delete_app_button = ttk.Button(frame_apps, text="Delete Selected", command=delete_selected_application)
 delete_app_button.pack(fill=tk.X)
 
-app_listbox.drop_target_register(DND_FILES)
-app_listbox.dnd_bind('<<Drop>>', lambda event: on_drop_file(event, app_listbox, "application"))
-
 # URLs frame
 url_label = ttk.Label(frame_urls, text="URLs")
 url_label.pack()
@@ -922,9 +1226,6 @@ add_url_button.pack(fill=tk.X)
 
 delete_url_button = ttk.Button(frame_urls, text="Delete Selected", command=delete_selected_url)
 delete_url_button.pack(fill=tk.X)
-
-url_listbox.drop_target_register(DND_TEXT)
-url_listbox.dnd_bind('<<Drop>>', lambda event: on_drop_file(event, url_listbox, "url"))
 
 # Log frame
 log_label = ttk.Label(frame_log, text="Messages Log")
@@ -948,6 +1249,16 @@ save_button.pack(fill=tk.X, expand=True)
 # Add right-click event binding for showing context menu
 app_listbox.bind("<Button-3>", lambda e: show_context_menu(e, app_listbox))
 url_listbox.bind("<Button-3>", lambda e: show_context_menu(e, url_listbox))
+
+authenticate_user()
+
+#drag & drop functionality
+
+app_listbox.drop_target_register(DND_FILES)
+app_listbox.dnd_bind('<<Drop>>', lambda event: on_drop_file(event, app_listbox, "application"))
+
+url_listbox.drop_target_register(DND_TEXT)
+url_listbox.dnd_bind('<<Drop>>', lambda event: on_drop_file(event, url_listbox, "url"))
 
 load_paths()
 # Run the application
