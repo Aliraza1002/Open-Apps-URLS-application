@@ -10,6 +10,38 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from hashlib import sha256
 
+class AppWithInactivityTimeout:
+    def __init__(self, root):
+        self.root = root
+        self.last_activity_time = time.time()  # Track the last activity time
+
+        # Bind events to detect user activity
+        self.root.bind("<Motion>", self.reset_timer)  # Mouse movement
+        self.root.bind("<KeyPress>", self.reset_timer)  # Keypress
+        self.root.bind("<FocusIn>", self.reset_timer)  # App window focus
+
+        # Start the inactivity checker
+        self.check_inactivity()
+
+    def reset_timer(self, event=None):
+        """Reset the inactivity timer."""
+        self.last_activity_time = time.time()
+
+    def check_inactivity(self):
+        """Check for inactivity and exit the application if the timeout is reached."""
+        current_time = time.time()
+        if current_time - self.last_activity_time > INACTIVITY_TIMEOUT:
+            self.exit_app()
+
+        # Recheck after 1 second
+        self.root.after(1000, self.check_inactivity)
+
+    def exit_app(self):
+        """Exit the application due to inactivity."""
+        print("Application is closing due to inactivity.")
+        self.root.destroy()  # Close the Tkinter window
+        sys.exit()
+        
 def add_uuid_to_entry(entry):
     """
     Ensures that each entry has a unique identifier (UUID).
@@ -18,15 +50,53 @@ def add_uuid_to_entry(entry):
         entry["uuid"] = str(uuid.uuid4())
     return entry
 
-# Authentication function
-def authenticate_user():
-    current_user = os.getlogin()
-    password = simpledialog.askstring("Authentication Required", f"Enter password for {current_user}:",
-                                       show="*")
-    if not password:
-        messagebox.showerror("Authentication Failed", "No password entered! Exiting application.")
-        raise SystemExit()
+def disable_features():
+    """Disable all interactive features until user logs in."""
+    # Disable listboxes
+    app_listbox.config(state="disabled")
+    url_listbox.config(state="disabled")
+    # Disable buttons
+    add_app_button.config(state="disabled")
+    add_folder_button.config(state="disabled")
+    delete_app_button.config(state="disabled")
+    add_url_button.config(state="disabled")
+    delete_url_button.config(state="disabled")
+    run_button.config(state="disabled")
+    save_button.config(state="disabled")
+    clear_log_button.config(state="disabled")
+    # Unregister drag-and-drop
+    app_listbox.drop_target_unregister()
+    url_listbox.drop_target_unregister()
 
+def enable_features():
+    """Enable all interactive features after user logs in."""
+    # Enable listboxes
+    app_listbox.config(state="normal")
+    url_listbox.config(state="normal")
+    # Enable buttons
+    add_app_button.config(state="normal")
+    add_folder_button.config(state="normal")
+    delete_app_button.config(state="normal")
+    add_url_button.config(state="normal")
+    delete_url_button.config(state="normal")
+    run_button.config(state="normal")
+    save_button.config(state="normal")
+    clear_log_button.config(state="normal")  # Add clear log button
+    # Register drag-and-drop
+    app_listbox.drop_target_register(DND_FILES)
+    app_listbox.dnd_bind('<<Drop>>', lambda event: on_drop_file(event, app_listbox, "application"))
+
+    url_listbox.drop_target_register(DND_TEXT)
+    url_listbox.dnd_bind('<<Drop>>', lambda event: on_drop_file(event, url_listbox, "url"))
+
+def authenticate_user():
+    """Prompt the user to authenticate themselves."""
+    current_user = os.getlogin()
+    password = simpledialog.askstring("Authentication Required", f"Enter password for {current_user}:", show="*")
+    if not password:
+        messagebox.showerror("Authentication Failed", "No password entered!")
+        return False
+    
     # Validate credentials
     advapi32 = ctypes.windll.advapi32
     kernel32 = ctypes.windll.kernel32
@@ -40,13 +110,46 @@ def authenticate_user():
         0,  # LOGON32_PROVIDER_DEFAULT
         ctypes.byref(handle)
     )
-
     if not success:
-        messagebox.showerror("Authentication Failed", "Invalid password! Exiting application.")
-        raise SystemExit()
+        messagebox.showerror("Authentication Failed", "Invalid password!")
+        return False
     else:
         messagebox.showinfo("Authentication Successful", f"Welcome, {current_user}!")
         kernel32.CloseHandle(handle)
+        return True
+
+def update_settings_menu():
+    """Update the Settings menu based on the login state."""
+    if is_authenticated:
+        # Get current menu labels
+        menu_labels = [settings_menu.entrycget(i, "label") for i in range(settings_menu.index("end") + 1)]
+        
+        if "Set Alert Email" not in menu_labels:
+            settings_menu.add_command(label="Set Alert Email", command=set_alert_email)
+
+        if "Export Data" not in menu_labels:
+            settings_menu.add_command(label="Export Data", command=export_data)
+
+        if "Import Data" not in menu_labels:
+            settings_menu.add_command(label="Import Data", command=import_data)
+    else:
+        # Remove all authenticated menu items
+        for i in range(settings_menu.index("end"), -1, -1):
+            label = settings_menu.entrycget(i, "label")
+            if label in {"Set Alert Email", "Export Data", "Import Data"}:
+                settings_menu.delete(i)
+            
+def login():
+    """Handle user login."""
+    global is_authenticated
+    if authenticate_user():
+        is_authenticated = True
+        enable_features()
+        log_message("User authenticated. Access granted.")
+        load_paths()
+        update_settings_menu()
+    else:
+        log_message("User authentication failed. Access restricted.")
 
 # Generate and save encryption key if it doesn't exist
 def generate_key():
@@ -87,6 +190,16 @@ def decrypt_json(encrypted_data):
     decrypted_data = fernet.decrypt(encrypted_data.encode()).decode()
     return json.loads(decrypted_data)
 
+def encrypt_alert_email(email):
+    """Encrypt the alert email address."""
+    fernet = Fernet(load_key())
+    return fernet.encrypt(email.encode()).decode()
+
+def decrypt_alert_email(encrypted_email):
+    """Decrypt the alert email address."""
+    fernet = Fernet(load_key())
+    return fernet.decrypt(encrypted_email.encode()).decode()
+
 def get_machine_sid():
     """Get the machine SID for tying JSON to a specific machine."""
     sid_obj, _, _ = win32security.LookupAccountName(None, os.getlogin())
@@ -120,7 +233,7 @@ def get_os_uuid():
     except Exception as e:
         print(f"Error fetching OS UUID: {e}")
         return None
-
+    
 def generate_dynamic_key():
     """Generate a machine-specific encryption key."""
     machine_sid = get_machine_sid()
@@ -131,22 +244,21 @@ def generate_dynamic_key():
     composite_string = f"{machine_sid}{processor_id}{disk_serial}{os_uuid}"
     return sha256(composite_string.encode()).digest()
 
-def send_alert_email(subject, body):
-    """Send an alert email for unauthorized JSON access."""
-    sender_email = "alirazatc.0012@gmail.com"
-    receiver_email = "aliraza_159@outlook.com"
-    password = "bfjd nmcc ceji ulcp"
+def send_alert_email(subject, body, receiver_email):
+    """Send an alert email for unauthorized JSON access using an unauthenticated SMTP server."""
+    smtp_server = "Mercury.swlauriersb.qc.ca"
+    smtp_port = 25
+    sender_email = "Auto_Launch_Security@swlauriersb.qc.ca"
 
     try:
         # Create MIME message
         message = MIMEMultipart()
-        # Mask the sender email with a display name
-        message["From"] = "Auto Launch Application Alert"
+        message["From"] = sender_email
         message["To"] = receiver_email
         message["Subject"] = subject
         message["Importance"] = "High"
 
-        # HTML content for better formatting
+        # Email body content
         html_content = f"""
         <html>
         <body style="font-family: Arial, sans-serif;">
@@ -172,16 +284,14 @@ def send_alert_email(subject, body):
         """
         message.attach(MIMEText(html_content, "html"))
 
-        # Connect to Gmail's SMTP server with STARTTLS
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()  # Upgrade to secure connection
-            server.login(sender_email, password)  # Login with the Gmail app password
+        # Send email
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
             server.sendmail(sender_email, receiver_email, message.as_string())
-        
-        log_message("Alert email sent successfully.")
-    except Exception as e:
-        log_message(f"Failed to send email. Error: {e}")
 
+        log_message(f"Alert email sent to {receiver_email}.")
+    except Exception as e:
+        log_message(f"Failed to send alert email: {e}")
 
 def get_system_info():
     """Collect system information to include in the alert email."""
@@ -197,11 +307,18 @@ def get_system_info():
     Timestamp: {timestamp}
     """
 
-def alert_on_invalid_json():
+def alert_on_invalid_json(recipient_email):
     """Send an alert email for unauthorized JSON access."""
-    subject = "Unauthorized Access Detected"
-    body = get_system_info()
-    send_alert_email(subject, body)
+    try:
+        # Prepare email subject and body
+        subject = "Auto Launch Interface Alert"
+        body = get_system_info()  # System information for debugging
+
+        # Send the alert email
+        send_alert_email(subject, body, recipient_email)
+
+    except Exception as e:
+        log_message(f"Failed to send alert email: {traceback.format_exc()}")
     
 # File to save application & URL paths
 user_appdata = os.path.join(os.path.expanduser("~"), "AppData", "Local", "ALI - TEST")
@@ -212,6 +329,9 @@ KEY_FILE = os.path.join(user_appdata, "secret.key")
 os.makedirs(user_appdata, exist_ok=True)
 generate_key()
 changes_made = False  # Track if any changes have been made
+INACTIVITY_TIMEOUT = 300
+is_authenticated = False
+user_email = None
 
 # Regex to validate URLs
 URL_REGEX = re.compile(
@@ -263,7 +383,9 @@ def open_application(app_uuid, args=None, first_url=True):
             else:
                 subprocess.Popen(app_path, cwd=start_in)
             time.sleep(2)
-
+        else:
+            os.startfile(app_path)
+            
         # Execute actions for all types
         for action in actions:
             execute_action(action)
@@ -366,27 +488,48 @@ def load_saved_data():
     """Load and validate saved application data."""
     if not os.path.exists(SAVE_FILE):
         return []
-
     try:
         with open(SAVE_FILE, 'r') as file:
-            encrypted_data = file.read()
+            # Read the file lines: first line contains the encrypted alert email (if any)
+            lines = file.readlines()
+            if lines:
+                encrypted_email = lines[0].strip()  # First line is the encrypted email
 
-        # Decrypt JSON data
+                # Skip decryption if the first line contains "none"
+                if encrypted_email.lower() == "none" or not encrypted_email:
+                    alert_email = "Araza@swlauriersb.qc.ca"  # Use fallback email if first line is "none" or empty
+                    print(encrypted_email)
+                else:
+                    try:
+                        alert_email = decrypt_alert_email(encrypted_email)
+                        print(alert_email)
+                    except Exception as e:
+                        log_message(f"Failed to decrypt alert email: {traceback.format_exc()}")
+                        alert_email = "Araza@swlauriersb.qc.ca"  # Fallback email if decryption fails
+            else:
+                alert_email = "Araza@swlauriersb.qc.ca"  # Default email if no lines are found
+
+            # Second line is the encrypted JSON data
+            encrypted_data = lines[1].strip() if len(lines) > 1 else None
+
+        # Decrypt the main JSON data
         try:
             data = decrypt_json(encrypted_data)
+            print(data)
         except Exception:
+            # If JSON decryption fails, attempt to send an alert using the decrypted or fallback email
+            alert_on_invalid_json(alert_email)
             messagebox.showerror(
                 "Access Denied",
                 "Failed to decrypt JSON file. This file does not belong to this machine."
             )
-            alert_on_invalid_json()
             raise SystemExit()
-
-        # Validate JSON metadata
+        
+        # Validate metadata
         try:
             validate_metadata(data.get("_metadata", {}))
         except ValueError as validation_error:
-            alert_on_invalid_json()
+            alert_on_invalid_json(alert_email)
             messagebox.showerror("Access Denied", str(validation_error))
             raise SystemExit()
 
@@ -408,11 +551,9 @@ def load_saved_data():
             apps.append(item)  # Add the item (with UUID and actions) to the apps list
         return items
 
-    except SystemExit:
-        raise
     except Exception as e:
-        messagebox.showerror("Error", f"Failed to load data: {e}")
-        raise SystemExit()
+        log_message(f"Error loading data: {traceback.format_exc()}")
+        raise
 
 def validate_metadata(metadata):
     """Validate the JSON metadata against the current machine and user."""
@@ -464,6 +605,7 @@ def get_shortcut_details(shortcut_path):
 # Update add_application to detect and set the "start-in" path for shortcuts
 def add_application():
     global changes_made
+    
     file_path = filedialog.askopenfilename()
     if file_path:
         unique_id = str(uuid.uuid4())  # Generate a unique ID for the item
@@ -504,6 +646,7 @@ def add_application():
 
 def add_folder():
     global changes_made
+    
     folder_path = filedialog.askdirectory()
     if folder_path:
         display_name = os.path.basename(folder_path)
@@ -519,9 +662,9 @@ def add_folder():
         log_message(f"Added folder: {display_name}")
         changes_made = True
 
-
 def add_url():
     global changes_made
+    
     url = url_entry.get()
     if url:
         if validate_url(url):
@@ -544,7 +687,6 @@ def add_url():
             log_message(f"Invalid URL: {url}")
             messagebox.showerror("Invalid URL", "The URL provided is invalid.")
 
-
 def save_paths():
     """Save application data with machine-specific metadata."""
     global changes_made  # Access the global changes_made flag
@@ -556,28 +698,47 @@ def save_paths():
         disk_serial = get_disk_serial_number()
         os_uuid = get_os_uuid()
 
-        # Prepare metadata
-        data_to_save = {
-            "items": apps,  # List of applications
-            "_metadata": {
-                "created_by": os.getlogin(),
-                "machine_sid": machine_sid,
-                "cpu_id": processor_id,
-                "disk_serial": disk_serial,
-                "os_uuid": os_uuid
-            }
+        # Load existing configuration if it exists to retrieve alert email
+        existing_metadata = {}
+        alert_email_encrypted = None  # Default value for alert email
+
+        if os.path.exists(SAVE_FILE):
+            with open(SAVE_FILE, 'r') as file:
+                lines = file.readlines()
+                if len(lines) > 0:
+                    alert_email_encrypted = lines[0].strip()  # First line is the encrypted alert email
+                if len(lines) > 1:
+                    encrypted_data = lines[1].strip()  # Second line is the encrypted JSON data
+
+        # Prepare the metadata without the alert email
+        metadata = {
+            "created_by": os.getlogin(),
+            "machine_sid": machine_sid,
+            "cpu_id": processor_id,
+            "disk_serial": disk_serial,
+            "os_uuid": os_uuid,
         }
 
-        # Encrypt and save
+        # Prepare the full data to save
+        data_to_save = {
+            "items": apps,  # List of applications
+            "_metadata": metadata,  # Store the metadata without alert email
+        }
+
+        # Encrypt the JSON data
         encrypted_data = encrypt_json(data_to_save)
+
+        # Write the alert email and the encrypted JSON data to the file
         with open(SAVE_FILE, 'w') as file:
-            file.write(encrypted_data)
+            # Write the encrypted alert email as the first line, followed by the encrypted JSON data
+            file.write(f"{alert_email_encrypted}\n{encrypted_data}")
 
         # Reset changes_made flag after successful save
         changes_made = False
         log_message("Data saved successfully!")
+
     except Exception as e:
-        log_message(f"Failed to save data: {e}")
+        log_message(f"Failed to save data: {traceback.format_exc()}")
         messagebox.showerror("Error", f"Failed to save data: {e}")
 
 def load_paths():
@@ -899,27 +1060,35 @@ def rename_item(event, listbox, item_type):
     # Define save_name function to save the custom name
     def save_name():
         custom_name = name_entry.get().strip()
+        # Check if the new name already exists in the list
+        if any(item['name'] == custom_name for item in apps):
+            messagebox.showerror("Duplicate Name", f"The name '{custom_name}' already exists. Please choose a different name.")
+            rename_dialog.lift()
+            return  # Prevent saving if the name is a duplicate
+
         if custom_name:
             item["name"] = custom_name
             listbox.delete(selected_index)
             listbox.insert(selected_index, custom_name)
             global changes_made
             changes_made = True
-        rename_dialog.destroy()
 
+        rename_dialog.destroy()
+        
     # Save button to trigger save_name function
     save_button = ttk.Button(rename_dialog, text="Save", command=save_name)
     save_button.pack(pady=10)
 
 # Load and decrypt passwords in the actions, only if necessary
 def load_decrypted_actions(actions):
+    """Decrypt passwords in actions if necessary."""
     for action in actions:
         if action.get("type") == "Password" and action.get("value"):
             # Decrypt only if not already decrypted
-            if isinstance(action["value"], str) and action.get("decrypted_in_session") is False:
+            if not action.get("decrypted_in_session", False):
                 try:
                     action["value"] = decrypt_password(action["value"])
-                    action["decrypted_in_session"] = True  # Mark this as decrypted for session
+                    action["decrypted_in_session"] = True
                 except Exception as e:
                     print(f"Error decrypting password: {e}")
                     action["value"] = ""  # Reset to empty if decryption fails
@@ -1142,6 +1311,8 @@ def on_close(sequence_dialog, temp_actions, app, decrypted_in_session):
 
 # Example of adding the save_password function to the context menu
 def show_context_menu(event, listbox):
+    if not is_authenticated:
+        return
     context_menu = tk.Menu(root, tearoff=0)
     context_menu.add_command(label="Change Name", command=lambda: rename_item(event, listbox, "application"))
     context_menu.add_command(label="Run Selected", command=lambda: run_selected(listbox))
@@ -1151,7 +1322,131 @@ def show_context_menu(event, listbox):
         context_menu.add_command(label="Set Start In Path", command=lambda: set_start_in_path(listbox))
 
     context_menu.post(event.x_root, event.y_root)
+
+def set_alert_email():
+    """Prompt the user to enter their email address for alerts and save it encrypted."""
     
+    # Check if an email is already saved and decrypt it
+    current_email = None
+    global user_email
+    
+    if os.path.exists(SAVE_FILE):
+        try:
+            with open(SAVE_FILE, 'r') as file:
+                lines = file.readlines()
+                if lines:
+                    encrypted_email = lines[0].strip()
+                    if encrypted_email.lower() != "none" and encrypted_email:
+                        current_email = decrypt_alert_email(encrypted_email)
+        except Exception as e:
+            log_message(f"Failed to load existing alert email: {traceback.format_exc()}")
+   
+    user_email = simpledialog.askstring(
+        "Set Alert Email",
+        "Enter your email address for alerts:",
+        initialvalue=current_email) # Pre-fill with current email if it exists
+    
+    # Save the new email if provided
+    if user_email is not None:
+        user_email = user_email.strip()
+        try:
+            # Encrypt the alert email
+            encrypted_email = encrypt_alert_email(user_email)
+            # Read the existing file (if any) to preserve encrypted JSON data
+            encrypted_data = ""
+            if os.path.exists(SAVE_FILE):
+                with open(SAVE_FILE, 'r') as file:
+                    lines = file.readlines()
+                    encrypted_data = lines[1].strip() if len(lines) > 1 else ""  # Second line is the encrypted JSON data
+
+            with open(SAVE_FILE, 'w') as file:
+                file.write(f"{encrypted_email}\n{encrypted_data}")
+
+            log_message(f"Alert email set and encrypted: {user_email}")
+
+        except Exception as e:
+            log_message(f"Failed to save alert email: {traceback.format_exc()}")
+
+def export_data():
+    """Export application data to a plain JSON file."""
+    global user_email
+    if not authenticate_user():
+        log_message("User authentication failed. Export canceled.")
+        return
+
+    # Ask the user for a file path to save the exported data
+    file_path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
+    if file_path:
+        try:
+            # Prepare the data for export with necessary metadata
+            export_data = {
+                "_metadata": {
+                    "created_by": os.getlogin(),  # The user who is exporting the data
+                    "for_export": True,  # Mark as for export
+                },
+                "items": apps,  # Export the entire apps list (applications, actions, etc.)
+            }
+
+            # Log the raw data before saving for debugging purposes
+            print("---- Export Data (Before Saving) ----")
+            print(export_data)
+            print("---- End of Export Data ----")
+
+            # Write the data to a JSON file
+            with open(file_path, 'w') as file:
+                json.dump(export_data, file, indent=4)  # Pretty print JSON data
+
+            log_message(f"Data exported successfully to {file_path}")
+        except Exception as e:
+            log_message(f"Failed to export data: {str(e)}")
+            messagebox.showerror("Export Error", f"Failed to export data: {str(e)}")
+
+def import_data():
+    """Import application data from a plain JSON file."""
+    file_path = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
+    if file_path:
+        try:
+            if not authenticate_user():
+                log_message("User authentication failed. Import canceled.")
+                return
+
+            # Open and read the JSON file
+            with open(file_path, 'r') as file:
+                imported_data = json.load(file)
+
+            # Check if the data is for export and if the user matches
+            metadata = imported_data.get("_metadata", {})
+            if metadata.get("created_by") != os.getlogin():
+                raise ValueError(f"The imported data does not belong to the current user.")
+            if not metadata.get("for_export", False):
+                raise ValueError("The selected file is not a valid export file.")
+
+            # Update the apps list with the imported items
+            global apps
+            apps = imported_data.get("items", [])  # Update the global apps variable
+
+            # Refresh the listboxes
+            refresh_listboxes(app_listbox, url_listbox)
+
+            log_message(f"Data imported successfully from {file_path}")
+        except Exception as e:
+            log_message(f"Failed to import data: {str(e)}")
+            messagebox.showerror("Import Error", f"Failed to import data: {str(e)}")
+
+def refresh_listboxes(app_listbox, url_listbox):
+    """Refresh the UI listboxes with the current apps and URLs data."""
+    # Clear the apps listbox
+    app_listbox.delete(0, tk.END)
+    for app in apps:
+        actions_display = "\n".join([display_action_text(action) for action in app.get("actions", [])])
+        app_listbox.insert(tk.END, f"{app['name']} - {actions_display}")
+
+    # Clear the URLs listbox
+    url_listbox.delete(0, tk.END)
+    for app in apps:
+        for url in app.get("urls", []):  # Assuming each app has a 'urls' field
+            url_listbox.insert(tk.END, url)
+
 apps = []
 start_in_paths = {}
 
@@ -1165,6 +1460,14 @@ root.iconphoto(False, img)
 root.update_idletasks()
 root.minsize(1000, 800)
 root.protocol("WM_DELETE_WINDOW", on_closing)
+
+AppWithInactivityTimeout(root)
+
+menu_bar = tk.Menu(root)
+settings_menu = tk.Menu(menu_bar, tearoff=0)
+settings_menu.add_command(label="Login", command=login)
+menu_bar.add_cascade(label="Settings", menu=settings_menu)
+root.config(menu=menu_bar)
 
 frame_label_font = tkfont.Font(family="Helvetica", size=14, weight="bold", slant="italic")
 button_label_font = tkfont.Font(family="Helvetica", size=10, weight="bold")
@@ -1231,8 +1534,11 @@ delete_url_button.pack(fill=tk.X)
 log_label = ttk.Label(frame_log, text="Messages Log")
 log_label.pack()
 
+
 log_text = tk.Text(frame_log, height=10, wrap=tk.WORD, state=tk.DISABLED, bg="#AE8B70", fg="#303437", font=listbox_font)  # Set colors and font
 log_text.pack(fill=tk.BOTH, expand=True)
+
+log_message("Log into the application by clicking on settings")
 
 button_frame = ttk.Frame(frame_log)
 button_frame.pack(pady=5, fill=tk.X)
@@ -1250,16 +1556,14 @@ save_button.pack(fill=tk.X, expand=True)
 app_listbox.bind("<Button-3>", lambda e: show_context_menu(e, app_listbox))
 url_listbox.bind("<Button-3>", lambda e: show_context_menu(e, url_listbox))
 
-authenticate_user()
-
 #drag & drop functionality
-
 app_listbox.drop_target_register(DND_FILES)
 app_listbox.dnd_bind('<<Drop>>', lambda event: on_drop_file(event, app_listbox, "application"))
 
 url_listbox.drop_target_register(DND_TEXT)
 url_listbox.dnd_bind('<<Drop>>', lambda event: on_drop_file(event, url_listbox, "url"))
 
-load_paths()
+disable_features() # All app features are disabled on start
+
 # Run the application
 root.mainloop()
