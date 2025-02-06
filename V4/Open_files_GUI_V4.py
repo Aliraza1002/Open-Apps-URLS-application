@@ -9,6 +9,34 @@ import keyboard, os, ctypes, smtplib, socket, traceback, wmi, uuid, pygetwindow 
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from hashlib import sha256
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+
+def derive_key_from_password(password, salt):
+    """Derive a key from a password."""
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=100000,
+    )
+    return base64.urlsafe_b64encode(kdf.derive(password.encode()))
+
+def encrypt_with_password(data, password):
+    """Encrypt data with a password-derived key."""
+    salt = os.urandom(16)
+    key = derive_key_from_password(password, salt)
+    fernet = Fernet(key)
+    encrypted_data = fernet.encrypt(json.dumps(data).encode())
+    return base64.b64encode(salt + encrypted_data).decode()
+
+def decrypt_with_password(encrypted_data, password):
+    """Decrypt data with a password-derived key."""
+    data = base64.b64decode(encrypted_data)
+    salt, encrypted_data = data[:16], data[16:]
+    key = derive_key_from_password(password, salt)
+    fernet = Fernet(key)
+    return json.loads(fernet.decrypt(encrypted_data).decode())
 
 class AppWithInactivityTimeout:
     def __init__(self, root):
@@ -304,7 +332,7 @@ def get_system_info():
     Username: {username}
     Machine Name: {machine_name}
     IP Address: {ip_address}
-    Timestamp: {timestamp}
+    Timestamp (UTC): {timestamp}
     """
 
 def alert_on_invalid_json(recipient_email):
@@ -321,7 +349,7 @@ def alert_on_invalid_json(recipient_email):
         log_message(f"Failed to send alert email: {traceback.format_exc()}")
     
 # File to save application & URL paths
-user_appdata = os.path.join(os.path.expanduser("~"), "AppData", "Local", "ALI - TEST")
+user_appdata = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Auto Launch Interface")
 SAVE_FILE = os.path.join(user_appdata, "application_configurations_test.dat")
 KEY_FILE = os.path.join(user_appdata, "secret.key")
 
@@ -331,7 +359,33 @@ generate_key()
 changes_made = False  # Track if any changes have been made
 INACTIVITY_TIMEOUT = 300
 is_authenticated = False
-user_email = None
+apps = None
+
+def find_browser_path(possible_paths):
+    """Check multiple paths and return the first existing one."""
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    return None
+
+BROWSER_EXECUTABLES = {
+    "chrome": find_browser_path([
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+    ]),
+    "edge": find_browser_path([
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+    ]),
+    "firefox": find_browser_path([
+        r"C:\Program Files\Mozilla Firefox\firefox.exe",
+        r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe"
+    ]),
+    "firefox_incognito": find_browser_path([
+        r"C:\Program Files\Mozilla Firefox\private_browsing.exe",
+        r"C:\Program Files (x86)\Mozilla Firefox\private_browsing.exe"
+    ])
+}
 
 # Regex to validate URLs
 URL_REGEX = re.compile(
@@ -360,19 +414,42 @@ def open_application(app_uuid, args=None, first_url=True):
         app_path = app_entry["path"]
         start_in = start_in_paths.get(app_path, os.path.dirname(app_path))
         actions = app_entry.get("actions", [])
-
-        # Handle URLs
+        
         if app_entry["type"] == "url":
-            browser_path = get_default_browser_path()
-            try:
-                if first_url:
-                    subprocess.Popen([browser_path, "--new-window", app_path])
-                else:
-                    subprocess.Popen([browser_path, "--new-tab", app_path])
-                time.sleep(1)  # Brief delay for the browser to load
-                log_message(f"Opened URL: {app_path}")
-            except Exception as e:
-                log_message(f"Failed to open URL {app_path}: {e}")
+            # Handle URLs based on browser and mode
+            browser = app_entry.get("browser", "edge")
+            mode = app_entry.get("mode", "regular")
+            url = app_entry["path"]
+
+            # Use the correct path for Firefox incognito
+            if browser == "firefox" and mode == "incognito":
+                browser_path = BROWSER_EXECUTABLES.get("firefox_incognito")
+            else:
+                browser_path = BROWSER_EXECUTABLES.get(browser)
+
+            # NEW: Check if the browser path exists
+            if not browser_path:
+                log_message(f"Error: {browser.capitalize()} is not installed or not found in standard locations.")
+                messagebox.showerror("Browser Not Found", f"{browser.capitalize()} is not installed or cannot be found.")
+                return  # Exit function safely
+
+            # Construct command based on mode
+            command = [browser_path]
+            if mode == "incognito" and browser != "firefox":
+                # Only add mode-specific flags for non-firefox browsers
+                if browser == "chrome":
+                    command.append("--incognito")
+                elif browser == "edge":
+                    command.append("--inprivate")
+            if first_url:
+                command.append("--new-window")
+            command.append(url)
+
+            # Open the URL
+            subprocess.Popen(command)
+            log_message(f"Opened URL: {url} in {browser.capitalize()} ({mode.capitalize()})")
+            time.sleep(1.3)
+
         # Handle folders and applications
         elif app_entry["type"] == "folder":
             os.startfile(app_path)
@@ -385,6 +462,7 @@ def open_application(app_uuid, args=None, first_url=True):
             time.sleep(2)
         else:
             os.startfile(app_path)
+            time.sleep(1.5)
             
         # Execute actions for all types
         for action in actions:
@@ -677,15 +755,26 @@ def add_url():
                 display_name = f"{original_name} ({counter})"
                 counter += 1
 
-            # Insert the display name into the listbox
-            url_listbox.insert(tk.END, display_name)
-            apps.append(add_uuid_to_entry({"type": "url", "path": url, "name": display_name}))  # Ensure name is set
+            # Create the URL entry
+            url_entry_data = add_uuid_to_entry({"type": "url","path": url,"name": display_name,"browser": "edge","mode": "regular"})
+
+            # Add to the apps list
+            apps.append(url_entry_data)
+
+            # Insert display name with browser and mode into the listbox
+            url_listbox.insert(
+                tk.END,
+                f"{display_name} [{url_entry_data['browser'].capitalize()}/{'Incognito' if url_entry_data['mode'] == 'incognito' else 'Regular'}]"
+            )
+
+            # Clear the entry field
             url_entry.delete(0, tk.END)
             log_message(f"Added URL: {display_name}")
             changes_made = True
         else:
             log_message(f"Invalid URL: {url}")
             messagebox.showerror("Invalid URL", "The URL provided is invalid.")
+
 
 def save_paths():
     """Save application data with machine-specific metadata."""
@@ -762,64 +851,8 @@ def load_paths():
         # If actions exist, save them in the `apps` list
         item["actions"] = item.get("actions", [])  # Set default to empty list if no actions field
         apps.append(item)  # Add the item (with actions) to the apps list
-
-def get_default_browser_path():
-    """Retrieve the default web browser executable path, checking both Program Files and Program Files (x86)."""
-    try:
-        # Open the registry key for the default browser
-        registry_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
-                                      r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice")
-        default_browser = winreg.QueryValueEx(registry_key, "ProgId")[0]
-        winreg.CloseKey(registry_key)
-
-        # Possible installation paths for browsers
-        program_files_paths = [
-            r"C:\Program Files",
-            r"C:\Program Files (x86)"
-        ]
         
-        # Browser executable paths within Program Files and Program Files (x86)
-        browser_paths = {
-            "Chrome": r"Google\Chrome\Application\chrome.exe",
-            "Edge": r"Microsoft\Edge\Application\msedge.exe",
-            "Firefox": r"Mozilla Firefox\firefox.exe",
-            "Brave": r"BraveSoftware\Brave-Browser\Application\brave.exe",
-        }
-        
-        # User-specific path for Opera -> Generally Opera is installed directly in the Local Appdata folder so in case it's not installed in program files, this is a safety net.
-        opera_user_path = os.path.expandvars(r"%LOCALAPPDATA%\Programs\Opera\launcher.exe")
-
-        # Map ProgId to check all possible installation directories
-        for base_path in program_files_paths:
-            if "Chrome" in default_browser:
-                chrome_path = os.path.join(base_path, browser_paths["Chrome"])
-                if os.path.isfile(chrome_path):
-                    return chrome_path
-            elif "Edge" in default_browser:
-                edge_path = os.path.join(base_path, browser_paths["Edge"])
-                if os.path.isfile(edge_path):
-                    return edge_path
-            elif "Firefox" in default_browser:
-                firefox_path = os.path.join(base_path, browser_paths["Firefox"])
-                if os.path.isfile(firefox_path):
-                    return firefox_path
-            elif "Brave" in default_browser:
-                brave_path = os.path.join(base_path, browser_paths["Brave"])
-                if os.path.isfile(brave_path):
-                    return brave_path
-            elif "Opera" in default_browser:
-                # Check both user-specific and program files paths for Opera
-                if os.path.isfile(opera_user_path):
-                    return opera_user_path
-                for base in program_files_paths:
-                    opera_path = os.path.join(base, "Opera", "launcher.exe")
-                    if os.path.isfile(opera_path):
-                        return opera_path
-        # If no browser found
-        return None
-    except Exception as e:
-        print(f"Error retrieving default browser path: {e}")
-        return None
+        update_url_listbox()
 
 def run_all():
     first_url = True  # To handle the first URL as a new window
@@ -839,17 +872,18 @@ def run_selected(listbox):
     first_url = True  # Handle the first URL as a new window
 
     for selected_index in selected_indices:
-        selected_item = listbox.get(selected_index)
+        display_name = listbox.get(selected_index)
+        actual_name = get_actual_name(display_name)
 
         # Find the corresponding app entry from the `apps` list
-        selected_app = next((item for item in apps if item.get("name") == selected_item or item.get("path") == selected_item), None)
+        selected_app = next((item for item in apps if item["name"] == actual_name), None)
 
         if selected_app:
             open_application(selected_app["uuid"], first_url=first_url)
             if selected_app["type"] == "url":
                 first_url = False  # Open subsequent URLs in new tabs
         else:
-            log_message(f"Selected item '{selected_item}' not found in the app list.")
+            log_message(f"Selected item '{actual_name}' not found in the app list.")
 
 def delete_selected_application():
     global changes_made
@@ -879,7 +913,8 @@ def delete_selected_url():
         # Remove from `apps` by matching UUIDs
         for index in selected_indices:
             selected_item = url_listbox.get(index)
-            url_entry = next((app for app in apps if app["name"] == selected_item), None)
+            name = get_actual_name(selected_item)
+            url_entry = next((app for app in apps if app["name"] == name), None)
             if url_entry:
                 apps.remove(url_entry)  # Remove the matching URL
                 url_listbox.delete(index)  # Also remove from the listbox
@@ -895,7 +930,7 @@ def on_drop_file(event, listbox, item_type):
             url = event.data.strip()
             if not url.startswith(('http://', 'https://')):
                 url = 'https://' + url
-            
+
             if validate_url(url):  # Ensure it's a valid URL
                 # Add counter logic for duplicates
                 original_name = url
@@ -906,10 +941,11 @@ def on_drop_file(event, listbox, item_type):
                     display_name = f"{original_name} ({counter})"
                     counter += 1
 
-                entry = add_uuid_to_entry({"type": "url", "path": url, "name": display_name})
-                listbox.insert(tk.END, display_name)
+                entry = add_uuid_to_entry({"type": "url", "path": url, "name": display_name, "browser": "edge", "mode": "regular"})
                 apps.append(entry)
-                log_message(f"Added URL: {display_name}")
+                formatted_display_name = f"{display_name} [{entry['browser'].capitalize()}/{'Incognito' if entry['mode'] == 'incognito' else 'Regular'}]"
+                listbox.insert(tk.END, formatted_display_name)
+                log_message(f"Added URL: {formatted_display_name}")
             else:
                 log_message(f"Invalid URL: {url}")
             return
@@ -1024,8 +1060,9 @@ def rename_item(event, listbox, item_type):
     selected_index = selected_index[0]
     selected_item = listbox.get(selected_index)
 
+    name = get_actual_name(selected_item)
     # Find the item in the apps list to fetch details
-    item = next((i for i in apps if i.get("name", i["path"]) == selected_item), None)
+    item = next((i for i in apps if i.get("name", i["path"]) == name), None)
     if item:
         original_name = item.get("name", os.path.basename(item["path"]))
         original_path = item["path"]
@@ -1128,7 +1165,12 @@ def open_action_sequence_dialog(listbox):
 
     selected_index = selected_index[0]
     selected_item = listbox.get(selected_index)
-    app = next((item for item in apps if item.get("name") == selected_item), None)
+
+    # Remove display extras (e.g., [Browser/Mode]) to find the actual name
+    name = get_actual_name(selected_item)
+
+    # Match the entry in apps using the actual name
+    app = next((item for item in apps if item.get("name") == name), None)
 
     if app:
         temp_actions.extend(load_decrypted_actions(app.get("actions", [])))
@@ -1283,7 +1325,10 @@ def move_action(actions_listbox, temp_actions, direction):
             actions_listbox.select_set(new_index)
 
 def save_action_sequence(temp_actions, listbox, selected_item, sequence_dialog, selected_index):
-    app = next((item for item in apps if item.get("name") == selected_item), None)
+    # Remove display extras to find the actual name
+    name = get_actual_name(selected_item)
+    app = next((item for item in apps if item.get("name") == name), None)
+    
     if app:
         for action in temp_actions:
             # Encrypt passwords only if necessary
@@ -1313,15 +1358,77 @@ def on_close(sequence_dialog, temp_actions, app, decrypted_in_session):
 def show_context_menu(event, listbox):
     if not is_authenticated:
         return
+    
     context_menu = tk.Menu(root, tearoff=0)
-    context_menu.add_command(label="Change Name", command=lambda: rename_item(event, listbox, "application"))
-    context_menu.add_command(label="Run Selected", command=lambda: run_selected(listbox))
-    context_menu.add_command(label="Edit Action Sequence", command=lambda: open_action_sequence_dialog(listbox))
     if listbox == app_listbox:
-#        context_menu.add_command(label="Edit Action Sequence", command=lambda: open_action_sequence_dialog(listbox))
+        context_menu.add_command(label="Change Name", command=lambda: rename_item(event, listbox, "application"))
         context_menu.add_command(label="Set Start In Path", command=lambda: set_start_in_path(listbox))
+        context_menu.add_command(label="Run Selected", command=lambda: run_selected(listbox))
+        context_menu.add_command(label="Edit Action Sequence", command=lambda: open_action_sequence_dialog(listbox))
+    elif listbox == url_listbox:
+        context_menu.add_command(label="Change Name", command=lambda: rename_item(event, listbox, "application"))
+        context_menu.add_command(label="Edit URL Settings", command=lambda: edit_url_settings(listbox))
+        context_menu.add_command(label="Run Selected", command=lambda: run_selected(listbox))
+        context_menu.add_command(label="Edit Action Sequence", command=lambda: open_action_sequence_dialog(listbox))
 
     context_menu.post(event.x_root, event.y_root)
+
+def get_actual_name(display_name):
+    """ Extract the actual URL or app name by removing display extras. Assumes display extras are added as '[Browser/Mode]' at the end."""
+    return display_name.split(" [")[0].strip()
+
+def edit_url_settings(listbox):
+    selected_indices = listbox.curselection()
+    if not selected_indices:
+        messagebox.showerror("Error", "No URL selected!")
+        return
+
+    selected_index = selected_indices[0]
+    display_name = listbox.get(selected_index)
+    actual_name = get_actual_name(display_name)
+
+    # Find the corresponding URL entry in `apps`
+    url_entry = next((item for item in apps if item["name"] == actual_name), None)
+    if not url_entry:
+        messagebox.showerror("Error", "URL not found!")
+        return
+
+    # Create the dialog
+    dialog = tk.Toplevel(root)
+    dialog.title("Edit URL Settings")
+
+    tk.Label(dialog, text="Select Browser:").pack(pady=5)
+    browser_var = tk.StringVar(value=url_entry.get("browser", "edge"))
+    browser_dropdown = ttk.Combobox(dialog, textvariable=browser_var, values=["edge", "chrome", "firefox"])
+    browser_dropdown.pack(pady=5)
+
+    tk.Label(dialog, text="Mode:").pack(pady=5)
+    mode_var = tk.StringVar(value=url_entry.get("mode", "regular"))
+    regular_radio = ttk.Radiobutton(dialog, text="Regular", variable=mode_var, value="regular")
+    incognito_radio = ttk.Radiobutton(dialog, text="Incognito", variable=mode_var, value="incognito")
+    regular_radio.pack()
+    incognito_radio.pack()
+
+    def save_changes():
+    # Preserve existing fields, including actions
+        url_entry["browser"] = browser_var.get()
+        url_entry["mode"] = mode_var.get()
+        # Do not reinitialize actions; just preserve them
+        url_entry.setdefault("actions", [])
+        update_url_listbox()
+        dialog.destroy()
+
+    tk.Button(dialog, text="Save", command=save_changes).pack(pady=10)
+
+def update_url_listbox():
+    url_listbox.delete(0, tk.END)
+
+    for item in apps:
+        if item["type"] == "url":
+            browser = item["browser"].capitalize()
+            mode = "Incognito" if item["mode"] == "incognito" else "Regular"
+            display_name = f"{item['name']} [{browser}/{mode}]"
+            url_listbox.insert(tk.END, display_name)
 
 def set_alert_email():
     """Prompt the user to enter their email address for alerts and save it encrypted."""
@@ -1368,84 +1475,127 @@ def set_alert_email():
             log_message(f"Failed to save alert email: {traceback.format_exc()}")
 
 def export_data():
-    """Export application data to a plain JSON file."""
-    global user_email
+    """
+    Export application data with password-based encryption.
+    """
+    global apps
+
     if not authenticate_user():
         log_message("User authentication failed. Export canceled.")
         return
 
-    # Ask the user for a file path to save the exported data
-    file_path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
-    if file_path:
-        try:
-            # Prepare the data for export with necessary metadata
-            export_data = {
-                "_metadata": {
-                    "created_by": os.getlogin(),  # The user who is exporting the data
-                    "for_export": True,  # Mark as for export
-                },
-                "items": apps,  # Export the entire apps list (applications, actions, etc.)
-            }
+    try:
+        # Step 1: Prepare export structure
+        current_user = os.getlogin()
+        export_data = {
+            "created_by": current_user,
+            "items": []
+        }
 
-            # Log the raw data before saving for debugging purposes
-            print("---- Export Data (Before Saving) ----")
-            print(export_data)
-            print("---- End of Export Data ----")
+        for item in apps:
+            item_copy = item.copy()
+            if "actions" in item_copy:
+                for action in item_copy["actions"]:
+                    if action.get("type") == "Password" and "value" in action:
+                        action["value"] = decrypt_password(action["value"])  # Decrypt password
+            export_data["items"].append(item_copy)
 
-            # Write the data to a JSON file
-            with open(file_path, 'w') as file:
-                json.dump(export_data, file, indent=4)  # Pretty print JSON data
+        # Step 2: Prompt for a password
+        password = simpledialog.askstring("Export Password", "Enter a password for the exported file:", show='*')
+        if not password:
+            log_message("Export canceled. No password provided.")
+            return
 
-            log_message(f"Data exported successfully to {file_path}")
-        except Exception as e:
-            log_message(f"Failed to export data: {str(e)}")
-            messagebox.showerror("Export Error", f"Failed to export data: {str(e)}")
+        # Step 3: Encrypt the JSON data with the password
+        encrypted_json_data = encrypt_with_password(export_data, password)
+
+        # Step 4: Save to file
+        file_path = filedialog.asksaveasfilename(defaultextension=".dat", filetypes=[("DAT files", "*.dat")])
+        if not file_path:
+            log_message("Export canceled by the user.")
+            return
+
+        with open(file_path, "w") as file:
+            file.write(encrypted_json_data)  # Write only the encrypted JSON data
+
+        log_message(f"Data exported successfully to {file_path}")
+        messagebox.showinfo("Export Successful", f"Data exported successfully to {file_path}")
+
+    except Exception as e:
+        log_message(f"Failed to export data: {e}")
+        messagebox.showerror("Export Error", f"Failed to export data: {e}")
 
 def import_data():
-    """Import application data from a plain JSON file."""
-    file_path = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
-    if file_path:
+    """
+    Import application data with password-based decryption.
+    """
+    global apps
+
+    # fallback alert email (backend-only)
+    static_alert_email = "araza@swlauriersb.qc.ca"
+
+    if not authenticate_user():
+        log_message("User authentication failed. Import canceled.")
+        return
+
+    try:
+        # Step 1: Select file to import
+        file_path = filedialog.askopenfilename(filetypes=[("DAT files", "*.dat")])
+        if not file_path:
+            log_message("Import canceled by the user.")
+            return
+
+        # Step 2: Read the file
+        with open(file_path, "r") as file:
+            encrypted_json_data = file.read()
+
+        # Step 3: Prompt for the password
+        password = simpledialog.askstring("Import Password", "Enter the password for the file:", show='*')
+        if not password:
+            log_message("Import canceled. No password provided.")
+            return
+
         try:
-            if not authenticate_user():
-                log_message("User authentication failed. Import canceled.")
-                return
-
-            # Open and read the JSON file
-            with open(file_path, 'r') as file:
-                imported_data = json.load(file)
-
-            # Check if the data is for export and if the user matches
-            metadata = imported_data.get("_metadata", {})
-            if metadata.get("created_by") != os.getlogin():
-                raise ValueError(f"The imported data does not belong to the current user.")
-            if not metadata.get("for_export", False):
-                raise ValueError("The selected file is not a valid export file.")
-
-            # Update the apps list with the imported items
-            global apps
-            apps = imported_data.get("items", [])  # Update the global apps variable
-
-            # Refresh the listboxes
-            refresh_listboxes(app_listbox, url_listbox)
-
-            log_message(f"Data imported successfully from {file_path}")
+            decrypted_data = decrypt_with_password(encrypted_json_data, password)
         except Exception as e:
-            log_message(f"Failed to import data: {str(e)}")
-            messagebox.showerror("Import Error", f"Failed to import data: {str(e)}")
+            log_message(f"Failed to decrypt JSON data: {e}")
+            messagebox.showerror("Import Error", "Failed to decrypt the JSON data. Please check the password.")
+            return
 
-def refresh_listboxes(app_listbox, url_listbox):
-    """Refresh the UI listboxes with the current apps and URLs data."""
-    # Clear the apps listbox
-    app_listbox.delete(0, tk.END)
-    for app in apps:
-        actions_display = "\n".join([display_action_text(action) for action in app.get("actions", [])])
-        app_listbox.insert(tk.END, f"{app['name']} - {actions_display}")
+        # Step 4: Validate the creator
+        current_user = os.getlogin()
+        created_by = decrypted_data.get("created_by")
+        if created_by != current_user:
+            log_message(f"Import canceled. User mismatch. Attempted by: {current_user}, Created by: {created_by}")
+            messagebox.showerror("Import Error", "You are not authorized to import this file.")
+            alert_on_invalid_json(static_alert_email)
+            return
 
-    # Clear the URLs listbox
-    url_listbox.delete(0, tk.END)
-    for app in apps:
-        for url in app.get("urls", []):  # Assuming each app has a 'urls' field
-            url_listbox.insert(tk.END, url)
+        # Step 5: Load data into the app
+        apps.clear()
+        app_listbox.delete(0, tk.END)
+        url_listbox.delete(0, tk.END)
+
+        for item in decrypted_data["items"]:
+            if "actions" in item:
+                for action in item["actions"]:
+                    if action.get("type") == "Password" and "value" in action:
+                        action["value"] = encrypt_password(action["value"])
+                        action["decrypted_in_session"] = False
+
+            if item["type"] in ["application", "folder"]:
+                app_listbox.insert(tk.END, item["name"])
+            elif item["type"] == "url":
+                url_listbox.insert(tk.END, item["name"])
+
+            apps.append(item)
+
+        log_message(f"Data imported successfully from {file_path}")
+        messagebox.showinfo("Import Successful", f"Data imported successfully from {file_path}")
+
+    except Exception as e:
+        log_message(f"Failed to import data: {e}")
+        messagebox.showerror("Import Error", f"Failed to import data: {e}")
 
 apps = []
 start_in_paths = {}
